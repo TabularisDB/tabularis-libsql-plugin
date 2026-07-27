@@ -85,7 +85,7 @@ echo '{"jsonrpc":"2.0","method":"get_tables","params":{"params":{"database":"/tm
 
 ## Installing
 
-`just dev-install` copies `libsql-plugin` and `manifest.json` into the Tabularis
+`just dev-install` copies `libsql-plugin` and `.tabularium` into the Tabularis
 plugins folder:
 
 - **Linux:** `~/.local/share/tabularis/plugins/libsql/`
