@@ -1,0 +1,93 @@
+{
+  "$schema": "https://tabularis.dev/schemas/plugin-manifest.json",
+  "id": "libsql",
+  "name": "libSQL",
+  "version": "0.1.0",
+  "description": "libSQL / Turso driver. Connects to local libSQL/SQLite files and to remote Turso or sqld servers over the Hrana HTTP protocol.",
+  "default_port": null,
+  "default_username": "",
+  "executable": "libsql-plugin",
+  "capabilities": {
+    "schemas": false,
+    "views": true,
+    "routines": false,
+    "file_based": false,
+    "folder_based": false,
+    "connection_string": true,
+    "connection_string_example": "libsql://my-db.turso.io?authToken=...  (or a local path like /data/app.db)",
+    "identifier_quote": "\"",
+    "alter_primary_key": false,
+    "inline_pk": true,
+    "auto_increment_keyword": "AUTOINCREMENT",
+    "serial_type": "",
+    "alter_column": false,
+    "create_foreign_keys": false,
+    "no_connection_required": false,
+    "manage_tables": true,
+    "readonly": false,
+    "supports_ssl": false
+  },
+  "data_types": [
+    {
+      "name": "INTEGER",
+      "category": "numeric",
+      "requires_length": false,
+      "requires_precision": false
+    },
+    {
+      "name": "REAL",
+      "category": "numeric",
+      "requires_length": false,
+      "requires_precision": false
+    },
+    {
+      "name": "NUMERIC",
+      "category": "numeric",
+      "requires_length": false,
+      "requires_precision": false
+    },
+    {
+      "name": "BOOLEAN",
+      "category": "other",
+      "requires_length": false,
+      "requires_precision": false
+    },
+    {
+      "name": "TEXT",
+      "category": "string",
+      "requires_length": false,
+      "requires_precision": false
+    },
+    {
+      "name": "VARCHAR",
+      "category": "string",
+      "requires_length": true,
+      "requires_precision": false,
+      "default_length": "255"
+    },
+    {
+      "name": "BLOB",
+      "category": "binary",
+      "requires_length": false,
+      "requires_precision": false
+    },
+    {
+      "name": "DATE",
+      "category": "date",
+      "requires_length": false,
+      "requires_precision": false
+    },
+    {
+      "name": "DATETIME",
+      "category": "date",
+      "requires_length": false,
+      "requires_precision": false
+    },
+    {
+      "name": "JSON",
+      "category": "json",
+      "requires_length": false,
+      "requires_precision": false
+    }
+  ]
+}
