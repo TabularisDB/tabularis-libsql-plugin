@@ -1,10 +1,12 @@
 {
-  "$schema": "https://tabularis.dev/schemas/plugin-manifest.json",
-  "id": "libsql",
-  "name": "libSQL",
+  "name": "libsql",
   "version": "0.1.0",
+  "kind": "driver",
   "description": "libSQL / Turso driver. Connects to local libSQL/SQLite files and to remote Turso or sqld servers over the Hrana HTTP protocol.",
-  "default_port": null,
+  "engine": "libsql",
+  "paradigms": [
+    "sql"
+  ],
   "default_username": "",
   "executable": "libsql-plugin",
   "capabilities": {
