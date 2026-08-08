@@ -23,7 +23,7 @@
     "auto_increment_keyword": "AUTOINCREMENT",
     "serial_type": "",
     "alter_column": true,
-    "create_foreign_keys": true,
+    "create_foreign_keys": false,
     "no_connection_required": false,
     "manage_tables": true,
     "readonly": false,

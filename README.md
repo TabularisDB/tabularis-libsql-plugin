@@ -51,7 +51,10 @@ libsql://my-db.turso.io?authToken=eyJ...
 | Schema snapshot + batch columns/FKs (ER diagram) | ✅ |
 | `CREATE TABLE` SQL, add column, create/drop index | ✅ |
 | Schemas, stored routines | ❌ (not a SQLite concept — Turso has no stored procedures, and its multi-database model is separate databases, not schemas) |
-| Alter column type, add/drop foreign key on existing table | ✅ remote Turso/sqld (libSQL `ALTER COLUMN` extension) / ❌ local files (vanilla SQLite — returns a clear error) |
+| Rename column | ✅ everywhere (vanilla `RENAME COLUMN`) |
+| Alter column type / default | ✅ remote Turso/sqld (libSQL `ALTER COLUMN` extension) / ⚠️ local files — the host calls the SQL builder without connection params, so the libSQL statement is generated unconditionally and local SQLite rejects it with its own parse error when the host runs it |
+| Drop foreign key on existing table | ✅ remote Turso/sqld (has connection params) / ❌ local (clear error) |
+| Add foreign key to existing table | ❌ (protocol limitation — see below) |
 
 Identifiers are quoted ANSI-style (`"name"`). Booleans are stored as `0`/`1` and
 BLOBs are returned base64-encoded.
@@ -63,13 +66,24 @@ Remote Turso / sqld servers run the **libSQL fork** of SQLite, which adds
 The plugin uses it to:
 
 - change a column's type (and optionally its DEFAULT / NOT NULL),
-- add a foreign key to an existing column (`... REFERENCES parent(pk)`),
-- drop a foreign key (same statement without the `REFERENCES` clause).
+- drop a foreign key from an existing column (the same statement without the
+  `REFERENCES` clause).
 
-Local SQLite files cannot do any of this and the driver reports a clear
-unsupported error. Note that libSQL applies constraint changes to newly
-inserted/updated rows only — existing rows are not rewritten or revalidated —
-and foreign key *enforcement* requires `PRAGMA foreign_keys=ON`.
+Local SQLite files cannot retype columns or touch existing foreign keys. The
+driver reports a clear error for foreign-key drops; note that libSQL applies
+constraint changes to newly inserted/updated rows only — existing rows are not
+rewritten or revalidated — and foreign key *enforcement* requires
+`PRAGMA foreign_keys=ON`.
+
+> **Why "add foreign key to existing table" is unavailable:** the host calls
+> the SQL preview builders with *no connection params*, and the libSQL
+> `ALTER COLUMN` rewrite replaces the column's whole definition — so building
+> the statement requires the column's declared type, which the host does not
+> send (only its name) and the plugin has no connection to look up. The
+> `.tabularium` capability is `create_foreign_keys: false`, so Tabularis hides
+> the add-FK dialog. Define foreign keys in the `CREATE TABLE` statement
+> instead. Dropping a foreign key does receive connection params and works on
+> remote Turso/sqld.
 
 ## Build & test
 
@@ -101,11 +115,16 @@ echo '{"jsonrpc":"2.0","method":"get_tables","params":{"params":{"database":"/tm
 ## Installing
 
 `just dev-install` copies `libsql-plugin` and `.tabularium` into the Tabularis
-plugins folder:
+plugins folder (the location Tabularis actually scans — derived from
+`ProjectDirs::from("com", "debba", "tabularis")`):
 
 - **Linux:** `~/.local/share/tabularis/plugins/libsql/`
-- **macOS:** `~/Library/Application Support/tabularis/plugins/libsql/`
-- **Windows:** `%APPDATA%\tabularis\plugins\libsql\`
+- **macOS:** `~/Library/Application Support/com.debba.tabularis/plugins/libsql/`
+- **Windows:** `%APPDATA%\debba\tabularis\data\plugins\libsql\`
+
+Note: the plugin guide's plain `%APPDATA%\tabularis\plugins` / macOS
+`tabularis/plugins` paths are wrong — that folder holds app config, not
+plugins; Tabularis scans the ProjectDirs path above.
 
 Restart Tabularis (or toggle the plugin in Settings) and **libSQL** appears in
 the Database Type list.
