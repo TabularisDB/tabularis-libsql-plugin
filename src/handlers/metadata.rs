@@ -29,7 +29,6 @@ fn columns_for(client: &Client, table: &str) -> Result<Vec<Value>, PluginError> 
         let name = cell_str(row, 1).unwrap_or_default();
         let raw_type = cell_str(row, 2).unwrap_or_default();
         let not_null = cell_i64(row, 3) != 0;
-        let default = cell(row, 4);
         let pk = cell_i64(row, 5) != 0;
         // INTEGER PRIMARY KEY is a rowid alias and behaves as auto-increment.
         let auto_increment = pk && raw_type.to_ascii_uppercase().contains("INT");
@@ -42,11 +41,10 @@ fn columns_for(client: &Client, table: &str) -> Result<Vec<Value>, PluginError> 
         columns.push(json!({
             "name": name,
             "data_type": data_type,
+            "is_pk": pk,
             "is_nullable": !not_null,
-            "column_default": default,
-            "is_primary_key": pk,
             "is_auto_increment": auto_increment,
-            "comment": Value::Null,
+            "default_value": cell_str(row, 4),
         }));
     }
     Ok(columns)
@@ -326,6 +324,34 @@ mod tests {
             ..Default::default()
         };
         Client::connect(&cp).expect("in-memory connection")
+    }
+
+    #[test]
+    fn columns_use_host_contract_keys() {
+        let client = in_memory_client();
+        client
+            .execute(
+                "CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL DEFAULT 'anon')",
+                &[],
+            )
+            .expect("create users");
+
+        let cols = columns_for(&client, "users").expect("columns");
+        assert_eq!(cols.len(), 2);
+
+        let id = &cols[0];
+        assert_eq!(id["name"], "id");
+        assert_eq!(id["data_type"], "INTEGER");
+        assert_eq!(id["is_pk"], true);
+        assert_eq!(id["is_nullable"], true);
+        assert_eq!(id["is_auto_increment"], true);
+        assert!(id.get("default_value").unwrap().is_null());
+
+        let name = &cols[1];
+        assert_eq!(name["is_pk"], false);
+        assert_eq!(name["is_nullable"], false);
+        assert_eq!(name["is_auto_increment"], false);
+        assert_eq!(name["default_value"], "'anon'");
     }
 
     #[test]
