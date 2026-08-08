@@ -118,12 +118,21 @@ mod tests {
     #[test]
     fn unsupported_ddl_reports_clear_error() {
         let resp = handle_line(
-            r#"{"jsonrpc":"2.0","method":"get_create_foreign_key_sql","params":{"params":{}},"id":1}"#,
+            r#"{"jsonrpc":"2.0","method":"get_create_foreign_key_sql","params":{"params":{"database":":memory:"},"table":"emails","column":"user_id","ref_table":"users","ref_column":"id"},"id":1}"#,
         );
         assert_eq!(resp["error"]["code"], -32601);
         assert!(resp["error"]["message"]
             .as_str()
             .unwrap()
             .contains("foreign key"));
+    }
+
+    #[test]
+    fn alter_column_on_local_reports_clear_error() {
+        let resp = handle_line(
+            r#"{"jsonrpc":"2.0","method":"get_alter_column_sql","params":{"params":{"database":":memory:"},"table":"t","old_column":{"name":"v","data_type":"TEXT"},"new_column":{"name":"v","data_type":"INTEGER"}},"id":1}"#,
+        );
+        assert_eq!(resp["error"]["code"], -32601);
+        assert!(resp["error"]["message"].as_str().unwrap().contains("Turso"));
     }
 }

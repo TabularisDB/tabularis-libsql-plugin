@@ -62,10 +62,10 @@ fn foreign_keys_for(client: &Client, table: &str) -> Result<Vec<Value>, PluginEr
         let from = cell_str(row, 3).unwrap_or_default();
         let to = cell_str(row, 4).unwrap_or_default();
         fks.push(json!({
-            "constraint_name": format!("fk_{table}_{from}_{id}"),
+            "name": format!("fk_{table}_{from}_{id}"),
             "column_name": from,
-            "referenced_table": ref_table,
-            "referenced_column": to,
+            "ref_table": ref_table,
+            "ref_column": to,
             "on_update": cell(row, 5),
             "on_delete": cell(row, 6),
         }));
@@ -312,4 +312,43 @@ fn batch_impl(
         out.insert(table.clone(), json!(extract(&client, &table)?));
     }
     Ok(Value::Object(out))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::Client;
+    use crate::models::ConnectionParams;
+
+    fn in_memory_client() -> Client {
+        let cp = ConnectionParams {
+            database: Some(":memory:".into()),
+            ..Default::default()
+        };
+        Client::connect(&cp).expect("in-memory connection")
+    }
+
+    #[test]
+    fn foreign_keys_use_host_contract_keys() {
+        let client = in_memory_client();
+        client
+            .execute("CREATE TABLE users(id INT PRIMARY KEY)", &[])
+            .expect("create users");
+        client
+            .execute(
+                "CREATE TABLE emails(user_id INT REFERENCES users(id) ON DELETE CASCADE)",
+                &[],
+            )
+            .expect("create emails");
+
+        let fks = foreign_keys_for(&client, "emails").expect("foreign keys");
+        assert_eq!(fks.len(), 1);
+        let fk = &fks[0];
+        assert_eq!(fk["name"], "fk_emails_user_id_0");
+        assert_eq!(fk["column_name"], "user_id");
+        assert_eq!(fk["ref_table"], "users");
+        assert_eq!(fk["ref_column"], "id");
+        assert_eq!(fk["on_delete"], "CASCADE");
+        assert_eq!(fk["on_update"], "NO ACTION");
+    }
 }

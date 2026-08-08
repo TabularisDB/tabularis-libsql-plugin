@@ -80,6 +80,13 @@ impl Client {
     pub fn health_check(&self) -> Result<(), PluginError> {
         self.query("SELECT 1", &[]).map(|_| ())
     }
+
+    /// True when this connection targets a remote Turso / sqld server.
+    /// Backend-gates features that only exist in the libSQL fork (e.g.
+    /// `ALTER TABLE ... ALTER COLUMN`).
+    pub fn is_remote(&self) -> bool {
+        matches!(self, Client::Remote(_))
+    }
 }
 
 fn local_query(conn: &Connection, sql: &str, args: &[Value]) -> Result<QueryResult, PluginError> {

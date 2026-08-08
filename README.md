@@ -50,11 +50,26 @@ libsql://my-db.turso.io?authToken=eyJ...
 | Insert / update / delete rows (bound parameters) | ✅ |
 | Schema snapshot + batch columns/FKs (ER diagram) | ✅ |
 | `CREATE TABLE` SQL, add column, create/drop index | ✅ |
-| Schemas, stored routines | ❌ (not a SQLite concept) |
-| Alter column type, add/drop foreign key on existing table | ❌ (SQLite limitation — returns a clear error) |
+| Schemas, stored routines | ❌ (not a SQLite concept — Turso has no stored procedures, and its multi-database model is separate databases, not schemas) |
+| Alter column type, add/drop foreign key on existing table | ✅ remote Turso/sqld (libSQL `ALTER COLUMN` extension) / ❌ local files (vanilla SQLite — returns a clear error) |
 
 Identifiers are quoted ANSI-style (`"name"`). Booleans are stored as `0`/`1` and
 BLOBs are returned base64-encoded.
+
+### Turso-only schema changes
+
+Remote Turso / sqld servers run the **libSQL fork** of SQLite, which adds
+`ALTER TABLE ... ALTER COLUMN col TO col <type> [DEFAULT ...] [REFERENCES ...]`.
+The plugin uses it to:
+
+- change a column's type (and optionally its DEFAULT / NOT NULL),
+- add a foreign key to an existing column (`... REFERENCES parent(pk)`),
+- drop a foreign key (same statement without the `REFERENCES` clause).
+
+Local SQLite files cannot do any of this and the driver reports a clear
+unsupported error. Note that libSQL applies constraint changes to newly
+inserted/updated rows only — existing rows are not rewritten or revalidated —
+and foreign key *enforcement* requires `PRAGMA foreign_keys=ON`.
 
 ## Build & test
 
