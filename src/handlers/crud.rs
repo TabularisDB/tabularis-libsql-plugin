@@ -81,8 +81,8 @@ fn insert_impl(params: &Value) -> Result<Value, PluginError> {
         columns.join(", "),
         placeholders.join(", "),
     );
-    client.execute(&sql, &args)?;
-    Ok(Value::Null)
+    let affected = client.execute(&sql, &args)?;
+    Ok(json!(affected))
 }
 
 pub fn update_record(id: Value, params: &Value) -> Value {
