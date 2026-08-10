@@ -167,6 +167,23 @@ fn is_url(s: &str) -> bool {
 
 /// Decide which backend a set of connection params points at.
 pub fn resolve_backend(params: &ConnectionParams) -> Result<Backend, PluginError> {
+    // 0. The raw connection URI is authoritative when the host passes it
+    // through (drivers with the `connection_uri` capability). The host still
+    // fills `host` from the same URI, but rebuilding the URL from the
+    // decomposed fields would drop the query string — and with it the auth
+    // token — so the verbatim URI wins.
+    if let Some(uri) = params.connection_uri.as_deref() {
+        let uri = uri.trim();
+        if !uri.is_empty() {
+            if is_url(uri) {
+                let (url, token_from_url) = normalize_remote_url(uri);
+                let token = token_from_url.or_else(|| params.password.clone());
+                return Ok(Backend::Remote { url, token });
+            }
+            return Ok(Backend::Local(expand_path(uri)));
+        }
+    }
+
     let database = params.database.clone().unwrap_or_default();
     let database = database.trim();
 
@@ -268,7 +285,11 @@ fn build_url_from_host(host: &str, port: Option<u16>, ssl_mode: Option<&str>) ->
 }
 
 fn expand_path(path: &str) -> String {
-    let path = path.strip_prefix("file:").unwrap_or(path);
+    let path = path
+        .strip_prefix("file:///")
+        .or_else(|| path.strip_prefix("file://"))
+        .or_else(|| path.strip_prefix("file:"))
+        .unwrap_or(path);
     if path == ":memory:" {
         return path.to_string();
     }
@@ -323,6 +344,84 @@ mod tests {
         let (url, token) = normalize_remote_url("libsql://db.turso.io?authToken=abc123");
         assert_eq!(url, "https://db.turso.io");
         assert_eq!(token.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn connection_uri_beats_host_and_keeps_the_token() {
+        // The host parser fills `host` from the same URI; without the
+        // `connection_uri` step the query string (and token) would be lost.
+        let p = ConnectionParams {
+            host: Some("db.turso.io".into()),
+            database: None,
+            connection_uri: Some("libsql://db.turso.io?authToken=abc123".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_backend(&p).unwrap(),
+            Backend::Remote {
+                url: "https://db.turso.io".into(),
+                token: Some("abc123".into())
+            }
+        );
+    }
+
+    #[test]
+    fn connection_uri_token_wins_over_password() {
+        let p = ConnectionParams {
+            host: Some("db.turso.io".into()),
+            password: Some("pw".into()),
+            connection_uri: Some("libsql://db.turso.io?authToken=abc123".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_backend(&p).unwrap(),
+            Backend::Remote {
+                url: "https://db.turso.io".into(),
+                token: Some("abc123".into())
+            }
+        );
+    }
+
+    #[test]
+    fn connection_uri_falls_back_to_password_without_token() {
+        let p = ConnectionParams {
+            host: Some("db.turso.io".into()),
+            password: Some("pw".into()),
+            connection_uri: Some("libsql://db.turso.io".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_backend(&p).unwrap(),
+            Backend::Remote {
+                url: "https://db.turso.io".into(),
+                token: Some("pw".into())
+            }
+        );
+    }
+
+    #[test]
+    fn connection_uri_local_path_is_a_local_backend() {
+        let p = ConnectionParams {
+            host: Some("db.turso.io".into()),
+            connection_uri: Some("/data/app.db".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_backend(&p).unwrap(),
+            Backend::Local("/data/app.db".into())
+        );
+    }
+
+    #[test]
+    fn connection_uri_file_scheme_is_a_local_backend() {
+        let p = ConnectionParams {
+            connection_uri: Some("file:///C:/data/app.db".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_backend(&p).unwrap(),
+            Backend::Local("C:/data/app.db".into())
+        );
     }
 
     #[test]

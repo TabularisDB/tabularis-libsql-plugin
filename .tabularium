@@ -7,6 +7,8 @@
   "paradigms": [
     "sql"
   ],
+  "icon": "sqlite",
+  "color": "#4ff8d2",
   "default_username": "",
   "executable": "libsql-plugin",
   "capabilities": {
@@ -16,7 +18,14 @@
     "file_based": false,
     "folder_based": false,
     "connection_string": true,
-    "connection_string_example": "libsql://my-db.turso.io?authToken=...  (or a local path like /data/app.db)",
+    "connection_string_example": "libsql://my-db.turso.io?authToken=...  (or a local file via file:///data/app.db)",
+    "connection_uri": true,
+    "connection_uri_schemes": [
+      "turso",
+      "wss",
+      "ws",
+      "file"
+    ],
     "identifier_quote": "\"",
     "alter_primary_key": false,
     "inline_pk": true,
