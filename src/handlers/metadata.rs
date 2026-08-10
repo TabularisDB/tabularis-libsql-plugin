@@ -102,6 +102,51 @@ fn indexes_for(client: &Client, table: &str) -> Result<Vec<Value>, PluginError> 
     Ok(indexes)
 }
 
+fn triggers_for(client: &Client) -> Result<Vec<Value>, PluginError> {
+    let r = client.query(
+        "SELECT name, tbl_name, sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name",
+        &[],
+    )?;
+    Ok(r.rows
+        .iter()
+        .filter_map(|row| {
+            let name = cell_str(row, 0)?;
+            let sql = cell_str(row, 2).unwrap_or_default();
+            let (timing, event) = trigger_timing_event(&sql);
+            Some(json!({
+                "name": name,
+                "table_name": cell_str(row, 1).unwrap_or_default(),
+                "event": event,
+                "timing": timing,
+                "definition": cell_str(row, 2),
+            }))
+        })
+        .collect())
+}
+
+fn trigger_timing_event(sql: &str) -> (String, String) {
+    let upper = sql.to_uppercase();
+    let timing = if upper.contains("INSTEAD OF") {
+        "INSTEAD OF"
+    } else if upper.contains("BEFORE") {
+        "BEFORE"
+    } else if upper.contains("AFTER") {
+        "AFTER"
+    } else {
+        ""
+    };
+    let event = if upper.contains("INSERT") {
+        "INSERT"
+    } else if upper.contains("UPDATE") {
+        "UPDATE"
+    } else if upper.contains("DELETE") {
+        "DELETE"
+    } else {
+        ""
+    };
+    (timing.to_string(), event.to_string())
+}
+
 fn list_views(client: &Client) -> Result<Vec<Value>, PluginError> {
     let r = client.query(
         "SELECT name FROM sqlite_master WHERE type = 'view' ORDER BY name",
@@ -170,6 +215,11 @@ pub fn get_indexes(id: Value, params: &Value) -> Value {
 
 pub fn get_views(id: Value, params: &Value) -> Value {
     respond(id, connect(params).and_then(|c| Ok(json!(list_views(&c)?))))
+}
+
+pub fn get_triggers(id: Value, params: &Value) -> Value {
+    // SQLite/libSQL has a single schema; the host's `schema` param is ignored.
+    respond(id, connect(params).and_then(|c| Ok(json!(triggers_for(&c)?))))
 }
 
 pub fn get_view_definition(id: Value, params: &Value) -> Value {
@@ -376,5 +426,49 @@ mod tests {
         assert_eq!(fk["ref_column"], "id");
         assert_eq!(fk["on_delete"], "CASCADE");
         assert_eq!(fk["on_update"], "NO ACTION");
+    }
+
+    #[test]
+    fn triggers_use_host_contract_keys() {
+        let client = in_memory_client();
+        client
+            .execute("CREATE TABLE t(id INT)", &[])
+            .expect("create t");
+        client
+            .execute(
+                "CREATE TRIGGER trg_after_ins AFTER INSERT ON t BEGIN UPDATE t SET id = 1; END",
+                &[],
+            )
+            .expect("create trigger");
+
+        let triggers = triggers_for(&client).expect("triggers");
+        assert_eq!(triggers.len(), 1);
+        let trg = &triggers[0];
+        assert_eq!(trg["name"], "trg_after_ins");
+        assert_eq!(trg["table_name"], "t");
+        assert_eq!(trg["timing"], "AFTER");
+        assert_eq!(trg["event"], "INSERT");
+        assert!(
+            trg["definition"]
+                .as_str()
+                .unwrap()
+                .starts_with("CREATE TRIGGER")
+        );
+    }
+
+    #[test]
+    fn trigger_timing_and_event_parse_heuristics() {
+        assert_eq!(
+            trigger_timing_event("CREATE TRIGGER x BEFORE UPDATE ON t BEGIN END"),
+            ("BEFORE".into(), "UPDATE".into())
+        );
+        assert_eq!(
+            trigger_timing_event("CREATE TRIGGER x INSTEAD OF DELETE ON v BEGIN END"),
+            ("INSTEAD OF".into(), "DELETE".into())
+        );
+        assert_eq!(
+            trigger_timing_event("CREATE TRIGGER x AFTER INSERT ON t BEGIN END"),
+            ("AFTER".into(), "INSERT".into())
+        );
     }
 }

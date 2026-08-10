@@ -16,15 +16,14 @@
 //! follow-up `execute_query` surfaces SQLite's own parse error. Renames use
 //! plain `RENAME COLUMN`, which vanilla SQLite supports too.
 //!
-//! `get_create_foreign_key_sql` cannot be implemented at all: the libSQL
-//! `ALTER COLUMN` rewrite replaces the column's whole definition (type
-//! included), so the builder needs the column's declared type — which the
-//! host does not provide for this method (only its name), and without
-//! connection params there is no way to look it up. It returns a clear
-//! unsupported error; the `.tabularium` `create_foreign_keys` capability is
-//! off so the host hides the add-FK dialog. Dropping a foreign key
-//! (`drop_foreign_key`) does receive connection params and stays supported
-//! on remote servers.
+//! `get_create_foreign_key_sql` is the one SQL builder that *does* receive
+//! connection params: the host's RpcDriver passes them through, so the
+//! column's declared type can be introspected and local connections (vanilla
+//! SQLite, no `ALTER COLUMN`) rejected up front with a clear error. It emits
+//! the libSQL `ALTER COLUMN col TO col <type> REFERENCES ...` form, which is
+//! the only way the fork supports adding a foreign key to an existing table.
+//! Dropping a foreign key (`drop_foreign_key`) also receives connection
+//! params and stays supported on remote servers.
 
 use serde_json::{json, Value};
 
@@ -287,17 +286,73 @@ fn build_create_index_sql(table: &str, name: &str, columns: &[String], unique: b
 // Foreign keys
 // ---------------------------------------------------------------------------
 
-/// Not implementable over the host protocol: the libSQL `ALTER COLUMN` form
-/// replaces the column's full definition, so it needs the column's declared
-/// type, but the host passes only the column *name* for this method and no
-/// connection params to look it up against.
-pub fn get_create_foreign_key_sql(id: Value, _params: &Value) -> Value {
-    respond(
-        id,
-        Err(PluginError::unsupported(
-            "cannot add a foreign key to an existing table: the host does not provide the column's type to the SQL builder and libSQL needs the full column definition; define the foreign key in the CREATE TABLE statement instead",
-        )),
-    )
+/// `ALTER TABLE ... ALTER COLUMN ... REFERENCES ...` adds a foreign key on
+/// the libSQL fork (remote Turso / sqld). Unlike the other SQL builders, the
+/// host sends connection params for this method (the RpcDriver passes them
+/// through), so the column's declared type can be introspected and the
+/// local/remote split decided here. Local bundled SQLite has no ALTER COLUMN
+/// and fails with a clear error instead.
+pub fn get_create_foreign_key_sql(id: Value, params: &Value) -> Value {
+    respond(id, {
+        (|| {
+            let client = connect(params)?;
+            require_remote(&client)?;
+            let table = req_str(params, "table")?;
+            let column = req_str(params, "column")?;
+            let ref_table = req_str(params, "ref_table")?;
+            let ref_column = req_str(params, "ref_column")?;
+            let on_delete = params
+                .get("on_delete")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let on_update = params
+                .get("on_update")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let col_type = column_type_for(&client, &table, &column)?;
+            Ok(json!([build_create_fk_sql(
+                &table,
+                &column,
+                &col_type,
+                &ref_table,
+                &ref_column,
+                on_delete.as_deref(),
+                on_update.as_deref(),
+            )]))
+        })()
+    })
+}
+
+/// Build a libSQL statement that adds a foreign key to an existing column:
+/// the ALTER COLUMN form with the column's full definition plus a REFERENCES
+/// clause. The constraint name is not used — SQLite foreign keys carry no
+/// names of their own; the host's generated `fk_<table>_<ref>_<col>` name is
+/// cosmetic and the plugin re-derives names from `PRAGMA foreign_key_list`.
+fn build_create_fk_sql(
+    table: &str,
+    column: &str,
+    col_type: &str,
+    ref_table: &str,
+    ref_column: &str,
+    on_delete: Option<&str>,
+    on_update: Option<&str>,
+) -> String {
+    let mut sql = format!(
+        "ALTER TABLE {} ALTER COLUMN {} TO {} {} REFERENCES {} ({})",
+        quote(table),
+        quote(column),
+        quote(column),
+        col_type,
+        quote(ref_table),
+        quote(ref_column),
+    );
+    if let Some(action) = on_delete {
+        sql.push_str(&format!(" ON DELETE {}", action));
+    }
+    if let Some(action) = on_update {
+        sql.push_str(&format!(" ON UPDATE {}", action));
+    }
+    sql
 }
 
 pub fn drop_index(id: Value, params: &Value) -> Value {
@@ -610,10 +665,43 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn create_foreign_key_sql_is_unsupported() {
+    fn create_foreign_key_builder_emits_libsql_alter_column() {
+        assert_eq!(
+            build_create_fk_sql(
+                "emails",
+                "user_id",
+                "INT",
+                "users",
+                "id",
+                None,
+                None,
+            ),
+            "ALTER TABLE \"emails\" ALTER COLUMN \"user_id\" TO \"user_id\" INT REFERENCES \"users\" (\"id\")"
+        );
+    }
+
+    #[test]
+    fn create_foreign_key_builder_appends_referential_actions() {
+        assert_eq!(
+            build_create_fk_sql(
+                "emails",
+                "user_id",
+                "INT",
+                "users",
+                "id",
+                Some("CASCADE"),
+                Some("SET NULL"),
+            ),
+            "ALTER TABLE \"emails\" ALTER COLUMN \"user_id\" TO \"user_id\" INT REFERENCES \"users\" (\"id\") ON DELETE CASCADE ON UPDATE SET NULL"
+        );
+    }
+
+    #[test]
+    fn create_foreign_key_local_is_unsupported() {
         let resp = get_create_foreign_key_sql(
             json!(1),
             &json!({
+                "params": { "database": ":memory:" },
                 "table": "emails",
                 "fk_name": "fk_emails_user_id_0",
                 "column": "user_id",
@@ -623,10 +711,7 @@ mod tests {
             }),
         );
         assert_eq!(resp["error"]["code"], -32601);
-        assert!(resp["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("foreign key"));
+        assert!(resp["error"]["message"].as_str().unwrap().contains("Turso"));
     }
 
     #[test]

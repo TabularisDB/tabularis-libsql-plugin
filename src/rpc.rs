@@ -31,6 +31,7 @@ pub fn handle_line(line: &str) -> Value {
         "get_foreign_keys" => handlers::metadata::get_foreign_keys(id, &params),
         "get_indexes" => handlers::metadata::get_indexes(id, &params),
         "get_views" => handlers::metadata::get_views(id, &params),
+        "get_triggers" => handlers::metadata::get_triggers(id, &params),
         "get_view_definition" => handlers::metadata::get_view_definition(id, &params),
         "get_view_columns" => handlers::metadata::get_view_columns(id, &params),
         "get_routines" => handlers::metadata::get_routines(id, &params),
@@ -116,15 +117,12 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_ddl_reports_clear_error() {
+    fn create_foreign_key_local_reports_clear_error() {
         let resp = handle_line(
-            r#"{"jsonrpc":"2.0","method":"get_create_foreign_key_sql","params":{"table":"emails","fk_name":"fk_emails_user_id_0","column":"user_id","ref_table":"users","ref_column":"id","schema":null},"id":1}"#,
+            r#"{"jsonrpc":"2.0","method":"get_create_foreign_key_sql","params":{"params":{"database":":memory:"},"table":"emails","fk_name":"fk_emails_user_id_0","column":"user_id","ref_table":"users","ref_column":"id","schema":null},"id":1}"#,
         );
         assert_eq!(resp["error"]["code"], -32601);
-        assert!(resp["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("foreign key"));
+        assert!(resp["error"]["message"].as_str().unwrap().contains("Turso"));
     }
 
     #[test]
