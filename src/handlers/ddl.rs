@@ -13,17 +13,16 @@
 //! which covers both. Statement *builders* cannot tell local from remote (no
 //! connection params arrive), so `get_alter_column_sql` emits the libSQL form
 //! unconditionally: it works on remote connections and, on local files, the
-//! follow-up `execute_query` surfaces SQLite's own parse error. Renames use
-//! plain `RENAME COLUMN`, which vanilla SQLite supports too.
+//! embedded libSQL fork understands the same syntax, so it works there too.
+//! Renames use plain `RENAME COLUMN`, which vanilla SQLite supports too.
 //!
 //! `get_create_foreign_key_sql` is the one SQL builder that *does* receive
 //! connection params: the host's RpcDriver passes them through, so the
-//! column's declared type can be introspected and local connections (vanilla
-//! SQLite, no `ALTER COLUMN`) rejected up front with a clear error. It emits
-//! the libSQL `ALTER COLUMN col TO col <type> REFERENCES ...` form, which is
-//! the only way the fork supports adding a foreign key to an existing table.
+//! column's declared type can be introspected. It emits the libSQL
+//! `ALTER COLUMN col TO col <type> REFERENCES ...` form, which is the only
+//! way the fork supports adding a foreign key to an existing table.
 //! Dropping a foreign key (`drop_foreign_key`) also receives connection
-//! params and stays supported on remote servers.
+//! params and stays supported on every backend.
 
 use serde_json::{json, Value};
 
@@ -287,16 +286,14 @@ fn build_create_index_sql(table: &str, name: &str, columns: &[String], unique: b
 // ---------------------------------------------------------------------------
 
 /// `ALTER TABLE ... ALTER COLUMN ... REFERENCES ...` adds a foreign key on
-/// the libSQL fork (remote Turso / sqld). Unlike the other SQL builders, the
-/// host sends connection params for this method (the RpcDriver passes them
-/// through), so the column's declared type can be introspected and the
-/// local/remote split decided here. Local bundled SQLite has no ALTER COLUMN
-/// and fails with a clear error instead.
+/// the libSQL fork. Unlike the other SQL builders, the host sends connection
+/// params for this method (the RpcDriver passes them through), so the
+/// column's declared type can be introspected. Both remote servers and local
+/// files (embedded fork) understand the syntax.
 pub fn get_create_foreign_key_sql(id: Value, params: &Value) -> Value {
     respond(id, {
         (|| {
             let client = connect(params)?;
-            require_remote(&client)?;
             let table = req_str(params, "table")?;
             let column = req_str(params, "column")?;
             let ref_table = req_str(params, "ref_table")?;
@@ -366,15 +363,14 @@ pub fn drop_index(id: Value, params: &Value) -> Value {
 }
 
 /// Dropping a foreign key is a schema rewrite on the libSQL fork: the same
-/// ALTER COLUMN form without the REFERENCES clause. Unlike the SQL builders
-/// above, this mutation *does* receive connection params, so the local/remote
-/// split can be decided here and the column's type introspected.
+/// ALTER COLUMN form without the REFERENCES clause. This mutation receives
+/// connection params, so the column's type can be introspected. Works on
+/// remote servers and local files alike.
 pub fn drop_foreign_key(id: Value, params: &Value) -> Value {
     respond(
         id,
         (|| {
             let client = connect(params)?;
-            require_remote(&client)?;
             let table = req_str(params, "table")?;
             let fk_name = req_str(params, "fk_name")?;
             let column = foreign_key_column_for(&client, &table, &fk_name)?;
@@ -383,19 +379,6 @@ pub fn drop_foreign_key(id: Value, params: &Value) -> Value {
             Ok(Value::Null)
         })(),
     )
-}
-
-/// `ALTER TABLE ... ALTER COLUMN` exists only in the libSQL fork (remote
-/// Turso / sqld). Local bundled SQLite rejects the syntax, so fail early
-/// with a clear message instead of a confusing parse error.
-fn require_remote(client: &Client) -> Result<(), PluginError> {
-    if client.is_remote() {
-        Ok(())
-    } else {
-        Err(PluginError::unsupported(
-            "local SQLite cannot alter an existing column's type or foreign key; this requires the libSQL fork used by remote Turso / sqld servers",
-        ))
-    }
 }
 
 /// Build a libSQL statement that drops an existing column's foreign key:
@@ -696,12 +679,38 @@ mod tests {
         );
     }
 
+    /// A temp-file database shared across connections (in-memory DBs are
+    /// per-connection, and the handlers open their own connection).
+    fn temp_file_client() -> (Client, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!(
+            "libsql_plugin_test_{}_{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cp = ConnectionParams {
+            database: Some(path.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let client = Client::connect(&cp).expect("temp-file connection");
+        (client, path)
+    }
+
     #[test]
-    fn create_foreign_key_local_is_unsupported() {
+    fn create_foreign_key_local_uses_the_fork() {
+        let (client, path) = temp_file_client();
+        client
+            .execute("CREATE TABLE users(id INT PRIMARY KEY)", &[])
+            .expect("create users");
+        client
+            .execute("CREATE TABLE emails(user_id INT)", &[])
+            .expect("create emails");
         let resp = get_create_foreign_key_sql(
             json!(1),
             &json!({
-                "params": { "database": ":memory:" },
+                "params": { "database": path },
                 "table": "emails",
                 "fk_name": "fk_emails_user_id_0",
                 "column": "user_id",
@@ -710,22 +719,48 @@ mod tests {
                 "schema": null
             }),
         );
-        assert_eq!(resp["error"]["code"], -32601);
-        assert!(resp["error"]["message"].as_str().unwrap().contains("Turso"));
+        assert_eq!(
+            resp["result"],
+            json!(["ALTER TABLE \"emails\" ALTER COLUMN \"user_id\" TO \"user_id\" INT REFERENCES \"users\" (\"id\")"])
+        );
     }
 
     #[test]
-    fn drop_foreign_key_local_is_unsupported() {
+    fn drop_foreign_key_local_rewrites_the_schema() {
+        let (client, path) = temp_file_client();
+        client
+            .execute("CREATE TABLE users(id INT PRIMARY KEY)", &[])
+            .expect("create users");
+        client
+            .execute("CREATE TABLE emails(user_id INT REFERENCES users(id))", &[])
+            .expect("create emails");
         let resp = drop_foreign_key(
             json!(1),
             &json!({
-                "params": { "database": ":memory:" },
+                "params": { "database": path },
                 "table": "emails",
                 "fk_name": "fk_emails_user_id_0"
             }),
         );
-        assert_eq!(resp["error"]["code"], -32601);
-        assert!(resp["error"]["message"].as_str().unwrap().contains("Turso"));
+        assert!(resp.get("error").is_none(), "unexpected error: {resp}");
+        let after = client
+            .query("PRAGMA foreign_key_list(emails)", &[])
+            .expect("pragma");
+        assert!(after.rows.is_empty(), "FK should be gone");
+    }
+
+    #[test]
+    fn local_alter_column_retypes_through_the_fork() {
+        // The whole point of the embedded fork: local files speak ALTER COLUMN.
+        let client = in_memory_client();
+        client
+            .execute("CREATE TABLE t(v TEXT)", &[])
+            .expect("create table");
+        client
+            .execute("ALTER TABLE t ALTER COLUMN v TO v INTEGER", &[])
+            .expect("alter column should work on local files");
+        let r = client.query("PRAGMA table_info(t)", &[]).expect("pragma");
+        assert_eq!(cell_str(&r.rows[0], 2), Some("INTEGER".to_string()));
     }
 
     // -----------------------------------------------------------------------

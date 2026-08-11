@@ -117,12 +117,45 @@ mod tests {
     }
 
     #[test]
-    fn create_foreign_key_local_reports_clear_error() {
-        let resp = handle_line(
-            r#"{"jsonrpc":"2.0","method":"get_create_foreign_key_sql","params":{"params":{"database":":memory:"},"table":"emails","fk_name":"fk_emails_user_id_0","column":"user_id","ref_table":"users","ref_column":"id","schema":null},"id":1}"#,
+    fn create_foreign_key_local_works_through_the_fork() {
+        // Local files run the embedded libSQL fork, so ALTER COLUMN works.
+        let db = format!(
+            "{}/libsql_plugin_rpc_test_{}.db",
+            std::env::temp_dir().display(),
+            std::process::id()
         );
-        assert_eq!(resp["error"]["code"], -32601);
-        assert!(resp["error"]["message"].as_str().unwrap().contains("Turso"));
+        let mk = |sql: &str| {
+            let request = json!({
+                "jsonrpc": "2.0",
+                "method": "execute_query",
+                "params": { "params": { "database": db }, "query": sql, "limit": null, "page": 1, "schema": null },
+                "id": 1,
+            });
+            let resp = handle_line(&request.to_string());
+            assert!(resp.get("error").is_none(), "setup failed: {resp}");
+        };
+        mk("CREATE TABLE users(id INT PRIMARY KEY)");
+        mk("CREATE TABLE emails(user_id INT)");
+
+        let request = json!({
+            "jsonrpc": "2.0",
+            "method": "get_create_foreign_key_sql",
+            "params": {
+                "params": { "database": db },
+                "table": "emails",
+                "fk_name": "fk_emails_user_id_0",
+                "column": "user_id",
+                "ref_table": "users",
+                "ref_column": "id",
+                "schema": null
+            },
+            "id": 1,
+        });
+        let resp = handle_line(&request.to_string());
+        assert_eq!(
+            resp["result"],
+            json!(["ALTER TABLE \"emails\" ALTER COLUMN \"user_id\" TO \"user_id\" INT REFERENCES \"users\" (\"id\")"])
+        );
     }
 
     #[test]

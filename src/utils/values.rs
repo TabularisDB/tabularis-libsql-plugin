@@ -3,7 +3,7 @@
 //! Hrana (the protocol Turso/sqld speak over HTTP) encodes every value as a
 //! tagged object, e.g. `{"type":"integer","value":"42"}`. Integers are sent as
 //! strings to survive 64-bit precision, blobs as base64. These helpers are pure
-//! and fully unit-tested; the rusqlite (local) conversions live in `client.rs`
+//! and fully unit-tested; the libsql (local) conversions live in `client.rs`
 //! because they depend on the SQLite value type.
 
 use base64::engine::general_purpose::STANDARD;

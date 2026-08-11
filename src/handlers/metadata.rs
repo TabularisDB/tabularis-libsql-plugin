@@ -219,7 +219,10 @@ pub fn get_views(id: Value, params: &Value) -> Value {
 
 pub fn get_triggers(id: Value, params: &Value) -> Value {
     // SQLite/libSQL has a single schema; the host's `schema` param is ignored.
-    respond(id, connect(params).and_then(|c| Ok(json!(triggers_for(&c)?))))
+    respond(
+        id,
+        connect(params).and_then(|c| Ok(json!(triggers_for(&c)?))),
+    )
 }
 
 pub fn get_view_definition(id: Value, params: &Value) -> Value {
@@ -448,12 +451,10 @@ mod tests {
         assert_eq!(trg["table_name"], "t");
         assert_eq!(trg["timing"], "AFTER");
         assert_eq!(trg["event"], "INSERT");
-        assert!(
-            trg["definition"]
-                .as_str()
-                .unwrap()
-                .starts_with("CREATE TRIGGER")
-        );
+        assert!(trg["definition"]
+            .as_str()
+            .unwrap()
+            .starts_with("CREATE TRIGGER"));
     }
 
     #[test]

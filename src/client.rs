@@ -2,8 +2,8 @@
 //! expose a single `query`/`execute` surface the handlers can use without
 //! caring whether the database is a local file or a remote Turso server.
 
-use rusqlite::types::Value as SqliteValue;
-use rusqlite::Connection;
+use libsql::Connection as LibsqlConnection;
+use libsql::Value as LibsqlValue;
 use serde_json::{json, Value};
 
 use crate::error::PluginError;
@@ -13,7 +13,8 @@ use crate::models::ConnectionParams;
 /// Where a connection actually points.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Backend {
-    /// Local libSQL/SQLite file (or `:memory:`).
+    /// Local libSQL/SQLite file (or `:memory:`), opened through the libSQL
+    /// fork of SQLite so fork extensions (ALTER COLUMN, FK add) work locally.
     Local(String),
     /// Remote Turso / sqld server reachable over Hrana HTTP.
     Remote { url: String, token: Option<String> },
@@ -31,19 +32,14 @@ pub struct QueryResult {
 /// stateless (each call is an independent HTTP request), so there is no shared
 /// mutable state to manage.
 pub enum Client {
-    Local(Connection),
+    Local(LibsqlConnection),
     Remote(HranaClient),
 }
 
 impl Client {
     pub fn connect(params: &ConnectionParams) -> Result<Self, PluginError> {
         match resolve_backend(params)? {
-            Backend::Local(path) => {
-                let conn = Connection::open(&path).map_err(|e| {
-                    PluginError::internal(format!("cannot open libSQL file '{path}': {e}"))
-                })?;
-                Ok(Client::Local(conn))
-            }
+            Backend::Local(path) => Ok(Client::Local(open_local(&path)?)),
             Backend::Remote { url, token } => Ok(Client::Remote(HranaClient::new(url, token))),
         }
     }
@@ -67,10 +63,8 @@ impl Client {
     pub fn execute(&self, sql: &str, args: &[Value]) -> Result<u64, PluginError> {
         match self {
             Client::Local(conn) => {
-                let sqlite_args = to_sqlite_params(args);
-                let mut stmt = conn.prepare(sql)?;
-                let affected = stmt.execute(rusqlite::params_from_iter(sqlite_args.iter()))?;
-                Ok(affected as u64)
+                let libsql_args: Vec<LibsqlValue> = args.iter().map(json_to_libsql).collect();
+                futures::executor::block_on(conn.execute(sql, libsql_args)).map_err(Into::into)
             }
             Client::Remote(client) => Ok(client.execute(sql, args)?.affected),
         }
@@ -80,28 +74,36 @@ impl Client {
     pub fn health_check(&self) -> Result<(), PluginError> {
         self.query("SELECT 1", &[]).map(|_| ())
     }
-
-    /// True when this connection targets a remote Turso / sqld server.
-    /// Backend-gates features that only exist in the libSQL fork (e.g.
-    /// `ALTER TABLE ... ALTER COLUMN`).
-    pub fn is_remote(&self) -> bool {
-        matches!(self, Client::Remote(_))
-    }
 }
 
-fn local_query(conn: &Connection, sql: &str, args: &[Value]) -> Result<QueryResult, PluginError> {
-    let sqlite_args = to_sqlite_params(args);
-    let mut stmt = conn.prepare(sql)?;
-    let columns: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+/// Open a local file through the embedded libSQL fork. `build()` is async in
+/// the crate's API but does its work synchronously, so `block_on` is a
+/// straight bridge — no runtime threads, matching the plugin's sync stdio loop.
+fn open_local(path: &str) -> Result<LibsqlConnection, PluginError> {
+    let db = futures::executor::block_on(libsql::Builder::new_local(path).build())
+        .map_err(|e| PluginError::internal(format!("cannot open libSQL file '{path}': {e}")))?;
+    db.connect()
+        .map_err(|e| PluginError::internal(format!("cannot open libSQL file '{path}': {e}")))
+}
+
+fn local_query(
+    conn: &LibsqlConnection,
+    sql: &str,
+    args: &[Value],
+) -> Result<QueryResult, PluginError> {
+    let libsql_args: Vec<LibsqlValue> = args.iter().map(json_to_libsql).collect();
+    let mut rows = futures::executor::block_on(conn.query(sql, libsql_args))?;
+    let columns: Vec<String> = (0..rows.column_count())
+        .map(|i| rows.column_name(i).unwrap_or("").to_string())
+        .collect();
     let ncol = columns.len();
 
     let mut out_rows = Vec::new();
-    let mut rows = stmt.query(rusqlite::params_from_iter(sqlite_args.iter()))?;
-    while let Some(row) = rows.next()? {
+    while let Some(row) = futures::executor::block_on(rows.next())? {
         let mut cells = Vec::with_capacity(ncol);
         for i in 0..ncol {
-            let value: SqliteValue = row.get(i)?;
-            cells.push(sqlite_to_json(value));
+            let value = row.get_value(i as i32)?;
+            cells.push(libsql_value_to_json(value));
         }
         out_rows.push(cells);
     }
@@ -113,37 +115,33 @@ fn local_query(conn: &Connection, sql: &str, args: &[Value]) -> Result<QueryResu
     })
 }
 
-fn to_sqlite_params(args: &[Value]) -> Vec<SqliteValue> {
-    args.iter().map(json_to_sqlite).collect()
-}
-
-fn json_to_sqlite(value: &Value) -> SqliteValue {
+fn json_to_libsql(value: &Value) -> LibsqlValue {
     match value {
-        Value::Null => SqliteValue::Null,
-        Value::Bool(b) => SqliteValue::Integer(if *b { 1 } else { 0 }),
+        Value::Null => LibsqlValue::Null,
+        Value::Bool(b) => LibsqlValue::Integer(if *b { 1 } else { 0 }),
         Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                SqliteValue::Integer(i)
+                LibsqlValue::Integer(i)
             } else if let Some(f) = n.as_f64() {
-                SqliteValue::Real(f)
+                LibsqlValue::Real(f)
             } else {
-                SqliteValue::Text(n.to_string())
+                LibsqlValue::Text(n.to_string())
             }
         }
-        Value::String(s) => SqliteValue::Text(s.clone()),
-        other => SqliteValue::Text(other.to_string()),
+        Value::String(s) => LibsqlValue::Text(s.clone()),
+        other => LibsqlValue::Text(other.to_string()),
     }
 }
 
-fn sqlite_to_json(value: SqliteValue) -> Value {
+fn libsql_value_to_json(value: LibsqlValue) -> Value {
     use base64::engine::general_purpose::STANDARD;
     use base64::Engine;
     match value {
-        SqliteValue::Null => Value::Null,
-        SqliteValue::Integer(i) => json!(i),
-        SqliteValue::Real(f) => json!(f),
-        SqliteValue::Text(s) => Value::String(s),
-        SqliteValue::Blob(b) => Value::String(STANDARD.encode(b)),
+        LibsqlValue::Null => Value::Null,
+        LibsqlValue::Integer(i) => json!(i),
+        LibsqlValue::Real(f) => json!(f),
+        LibsqlValue::Text(s) => Value::String(s),
+        LibsqlValue::Blob(b) => Value::String(STANDARD.encode(b)),
     }
 }
 

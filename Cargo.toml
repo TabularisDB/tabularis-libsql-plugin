@@ -16,9 +16,14 @@ path = "src/main.rs"
 
 [dependencies]
 serde_json = "1"
-# Local file backend: bundled SQLite, compiled from source -> no system lib
-# needed, builds identically on Linux, macOS and Windows.
-rusqlite = { version = "0.31", features = ["bundled"] }
+# Local file backend: the libSQL fork of SQLite, bundled (compiled from source
+# -> no system lib, builds identically on Linux, macOS and Windows). Using the
+# fork gives local files the same ALTER COLUMN / FK-add extensions as remote
+# Turso servers. The `core` feature is embedded-local only; the async API does
+# all its work synchronously, so futures::executor::block_on bridges it
+# without pulling in a tokio runtime.
+libsql = { version = "0.9", default-features = false, features = ["core"] }
+futures = "0.3"
 # Remote backend: blocking HTTP client with pure-Rust rustls TLS (no OpenSSL),
 # used to speak the Hrana-over-HTTP pipeline protocol to Turso / sqld.
 ureq = { version = "2", features = ["json"] }
