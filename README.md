@@ -52,38 +52,36 @@ libsql://my-db.turso.io?authToken=eyJ...
 | `CREATE TABLE` SQL, add column, create/drop index | ✅ |
 | Schemas, stored routines | ❌ (not a SQLite concept — Turso has no stored procedures, and its multi-database model is separate databases, not schemas) |
 | Rename column | ✅ everywhere (vanilla `RENAME COLUMN`) |
-| Alter column type / default | ✅ remote Turso/sqld (libSQL `ALTER COLUMN` extension) / ⚠️ local files — the host calls the SQL builder without connection params, so the libSQL statement is generated unconditionally and local SQLite rejects it with its own parse error when the host runs it |
-| Drop foreign key on existing table | ✅ remote Turso/sqld (has connection params) / ❌ local (clear error) |
-| Add foreign key to existing table | ❌ (protocol limitation — see below) |
+| Alter column type / default | ✅ everywhere (libSQL `ALTER COLUMN` extension) |
+| Drop foreign key on existing table | ✅ everywhere |
+| Add foreign key to existing table | ✅ everywhere (see below) |
 
 Identifiers are quoted ANSI-style (`"name"`). Booleans are stored as `0`/`1` and
 BLOBs are returned base64-encoded.
 
-### Turso-only schema changes
+### Schema changes via ALTER COLUMN
 
-Remote Turso / sqld servers run the **libSQL fork** of SQLite, which adds
+Both local files and remote Turso / sqld servers run the **libSQL fork** of
+SQLite, which adds
 `ALTER TABLE ... ALTER COLUMN col TO col <type> [DEFAULT ...] [REFERENCES ...]`.
 The plugin uses it to:
 
 - change a column's type (and optionally its DEFAULT / NOT NULL),
-- drop a foreign key from an existing column (the same statement without the
-  `REFERENCES` clause).
+- add or drop a foreign key on an existing column (the same statement with or
+  without the `REFERENCES` clause).
 
-Local SQLite files cannot retype columns or touch existing foreign keys. The
-driver reports a clear error for foreign-key drops; note that libSQL applies
+The `get_create_foreign_key_sql` builder always receives connection params from
+the host, and `get_alter_column_sql` does too when the host provides them, so
+the plugin introspects the column's declared type and constraints (NOT NULL,
+DEFAULT, REFERENCES) and reproduces them in the rewrite — altering a column
+does not silently strip its foreign key or default. Note that libSQL applies
 constraint changes to newly inserted/updated rows only — existing rows are not
 rewritten or revalidated — and foreign key *enforcement* requires
 `PRAGMA foreign_keys=ON`.
 
-> **Why "add foreign key to existing table" is unavailable:** the host calls
-> the SQL preview builders with *no connection params*, and the libSQL
-> `ALTER COLUMN` rewrite replaces the column's whole definition — so building
-> the statement requires the column's declared type, which the host does not
-> send (only its name) and the plugin has no connection to look up. The
-> `.tabularium` capability is `create_foreign_keys: false`, so Tabularis hides
-> the add-FK dialog. Define foreign keys in the `CREATE TABLE` statement
-> instead. Dropping a foreign key does receive connection params and works on
-> remote Turso/sqld.
+Composite (multi-column) foreign keys cannot be dropped: the fork only rewrites
+per-column definitions, so `drop_foreign_key` reports a clear error instead of
+silently doing nothing.
 
 ## Build & test
 
@@ -143,8 +141,8 @@ src/
 └── utils/               # identifiers, pagination, SQL classification, value conversion
 ```
 
-Local files use [`rusqlite`](https://crates.io/crates/rusqlite) with the bundled
-SQLite. Remote connections use a small synchronous [`ureq`](https://crates.io/crates/ureq)
+Local files use the embedded **libSQL fork of SQLite** (bundled — nothing to
+install). Remote connections use a small synchronous [`ureq`](https://crates.io/crates/ureq)
 client (pure-Rust rustls TLS) speaking the stateless Hrana `/v2/pipeline`
 endpoint, so the same `query`/`execute` surface serves both backends with no
 async runtime.
