@@ -283,11 +283,7 @@ fn build_url_from_host(host: &str, port: Option<u16>, ssl_mode: Option<&str>) ->
 }
 
 fn expand_path(path: &str) -> String {
-    let path = path
-        .strip_prefix("file:///")
-        .or_else(|| path.strip_prefix("file://"))
-        .or_else(|| path.strip_prefix("file:"))
-        .unwrap_or(path);
+    let path = strip_file_scheme(path);
     if path == ":memory:" {
         return path.to_string();
     }
@@ -297,6 +293,25 @@ fn expand_path(path: &str) -> String {
         }
     }
     path.to_string()
+}
+
+/// `file:` is a URI scheme, not part of the path. On Windows `file:///C:/x`
+/// must lose its slashes to become a drive path, but on Unix `file:///data/x`
+/// must keep them: the third slash is the root of the absolute path, and
+/// stripping it would silently open a relative `data/x` instead.
+fn strip_file_scheme(path: &str) -> &str {
+    strip_file_scheme_for(path, cfg!(windows))
+}
+
+fn strip_file_scheme_for(path: &str, windows: bool) -> &str {
+    if windows {
+        path.strip_prefix("file:///")
+            .or_else(|| path.strip_prefix("file://"))
+            .or_else(|| path.strip_prefix("file:"))
+            .unwrap_or(path)
+    } else {
+        path.strip_prefix("file:").unwrap_or(path)
+    }
 }
 
 #[cfg(test)]
@@ -411,6 +426,36 @@ mod tests {
     }
 
     #[test]
+    fn file_scheme_stripping_is_platform_aware() {
+        // Windows drive URIs drop the whole `file:///` prefix...
+        assert_eq!(
+            strip_file_scheme_for("file:///C:/data/app.db", true),
+            "C:/data/app.db"
+        );
+        assert_eq!(
+            strip_file_scheme_for("file://C:/data/app.db", true),
+            "C:/data/app.db"
+        );
+        assert_eq!(
+            strip_file_scheme_for("file:C:/data/app.db", true),
+            "C:/data/app.db"
+        );
+        // ...but on Unix only the scheme is a prefix; the slashes are the
+        // root of the absolute path and must survive.
+        assert_eq!(
+            strip_file_scheme_for("file:///data/app.db", false),
+            "///data/app.db"
+        );
+        assert_eq!(
+            strip_file_scheme_for("file:/data/app.db", false),
+            "/data/app.db"
+        );
+        assert_eq!(strip_file_scheme_for("/data/app.db", false), "/data/app.db");
+        assert_eq!(strip_file_scheme_for("data/app.db", true), "data/app.db");
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn connection_uri_file_scheme_is_a_local_backend() {
         let p = ConnectionParams {
             connection_uri: Some("file:///C:/data/app.db".into()),
@@ -419,6 +464,21 @@ mod tests {
         assert_eq!(
             resolve_backend(&p).unwrap(),
             Backend::Local("C:/data/app.db".into())
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn connection_uri_file_scheme_keeps_absolute_unix_path() {
+        // The manifest example form: file:///data/app.db must resolve to the
+        // absolute /data/app.db, never the relative data/app.db.
+        let p = ConnectionParams {
+            connection_uri: Some("file:///data/app.db".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_backend(&p).unwrap(),
+            Backend::Local("///data/app.db".into())
         );
     }
 

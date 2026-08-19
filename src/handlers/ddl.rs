@@ -16,12 +16,12 @@
 //! embedded libSQL fork understands the same syntax, so it works there too.
 //! Renames use plain `RENAME COLUMN`, which vanilla SQLite supports too.
 //!
-//! `get_create_foreign_key_sql` is the one SQL builder that *does* receive
-//! connection params: the host's RpcDriver passes them through, so the
-//! column's declared type can be introspected. It emits the libSQL
-//! `ALTER COLUMN col TO col <type> REFERENCES ...` form, which is the only
-//! way the fork supports adding a foreign key to an existing table.
-//! Dropping a foreign key (`drop_foreign_key`) also receives connection
+//! `get_create_foreign_key_sql` and, when the host passes connection params
+//! through, `get_alter_column_sql` receive connection params, so the column's
+//! declared type and constraints can be introspected. `get_create_foreign_key_sql`
+//! emits the libSQL `ALTER COLUMN col TO col <type> REFERENCES ...` form,
+//! which is the only way the fork supports adding a foreign key to an existing
+//! table. Dropping a foreign key (`drop_foreign_key`) also receives connection
 //! params and stays supported on every backend.
 
 use serde_json::{json, Value};
@@ -193,46 +193,223 @@ pub fn get_alter_column_sql(id: Value, params: &Value) -> Value {
             let new_column = params
                 .get("new_column")
                 .ok_or_else(|| PluginError::invalid_params("missing 'new_column' definition"))?;
-            Ok(json!([build_alter_column_sql(
-                &table, old_column, new_column
-            )?]))
+            // The host normally calls this builder without connection params,
+            // but when it passes them (as it does for
+            // `get_create_foreign_key_sql`) the existing column definition is
+            // introspected so constraints like REFERENCES survive the rewrite.
+            let statements = if params.get("params").map(Value::is_object).unwrap_or(false) {
+                let client = connect(params)?;
+                build_alter_column_sql_with_schema(&client, &table, old_column, new_column)?
+            } else {
+                build_alter_column_sql(&table, old_column, new_column)?
+            };
+            Ok(json!(statements))
         })(),
     )
 }
 
-/// A rename uses vanilla `RENAME COLUMN` (works on every backend). Any other
-/// change emits the libSQL `ALTER COLUMN ... TO ...` form, which replaces the
-/// column's whole definition — the new `data_type` is mandatory for it.
+/// The parts of a column definition an `ALTER COLUMN` rewrite must reproduce
+/// (the fork replaces the whole definition, not just the edited bit).
+#[derive(PartialEq)]
+struct ColumnRewrite {
+    data_type: Option<String>,
+    not_null: bool,
+    default: Option<String>,
+    constraints: Vec<String>,
+}
+
+fn column_rewrite_from(column: &Value) -> ColumnRewrite {
+    ColumnRewrite {
+        data_type: col_field(column, &["data_type", "type"])
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        not_null: !col_nullable(column),
+        default: col_default(column).map(str::to_string),
+        constraints: constraint_clauses(column),
+    }
+}
+
+/// Column-level constraint clauses the host may pass through verbatim
+/// (`REFERENCES ...`, `UNIQUE`, `CHECK (...)`). They are not part of the
+/// ColumnDefinition contract, but when the host round-trips them the rewrite
+/// must keep them.
+fn constraint_clauses(column: &Value) -> Vec<String> {
+    ["references", "unique", "check", "constraints"]
+        .iter()
+        .filter_map(|k| col_field(column, &[k]).and_then(Value::as_str))
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Build the statements that alter a column. Renames use vanilla
+/// `RENAME COLUMN` (works on every backend). Any other change emits the
+/// libSQL `ALTER COLUMN ... TO ...` form, which replaces the column's whole
+/// definition, so the merged definition must reproduce every attribute. A
+/// rename combined with other changes emits both statements in order.
 fn build_alter_column_sql(
     table: &str,
     old_column: &Value,
     new_column: &Value,
-) -> Result<String, PluginError> {
+) -> Result<Vec<String>, PluginError> {
     let old_name = col_name(old_column)?;
     let new_name = col_name(new_column)?;
-    if old_name != new_name {
-        return Ok(format!(
+    let renamed = old_name != new_name;
+
+    let old_def = column_rewrite_from(old_column);
+    let mut new_def = column_rewrite_from(new_column);
+    // The dialog only sends what it edits; anything absent is carried over
+    // from the old definition so the rewrite does not silently drop it.
+    if new_def.data_type.is_none() {
+        new_def.data_type = old_def.data_type.clone();
+    }
+    if col_field(new_column, &["is_nullable", "nullable"]).is_none() {
+        new_def.not_null = old_def.not_null;
+    }
+    if col_field(new_column, &["default_value", "column_default", "default"]).is_none() {
+        new_def.default = old_def.default.clone();
+    }
+    for clause in &old_def.constraints {
+        if !new_def.constraints.contains(clause) {
+            new_def.constraints.push(clause.clone());
+        }
+    }
+
+    let mut statements = Vec::new();
+    if renamed {
+        statements.push(format!(
             "ALTER TABLE {} RENAME COLUMN {} TO {}",
             quote(table),
             quote(&old_name),
             quote(&new_name),
         ));
     }
-    let data_type = col_type(new_column)?;
+    if new_def != old_def {
+        let data_type = new_def
+            .data_type
+            .as_deref()
+            .ok_or_else(|| PluginError::invalid_params("column definition needs a 'data_type'"))?;
+        statements.push(build_column_rewrite_sql(
+            table, &new_name, data_type, &new_def,
+        ));
+    }
+    Ok(statements)
+}
+
+/// Like `build_alter_column_sql`, but with the existing column definition
+/// introspected from the schema, so attributes the dialog cannot express
+/// (notably REFERENCES) survive the rewrite.
+fn build_alter_column_sql_with_schema(
+    client: &Client,
+    table: &str,
+    old_column: &Value,
+    new_column: &Value,
+) -> Result<Vec<String>, PluginError> {
+    let old_name = col_name(old_column)?;
+    let new_name = col_name(new_column)?;
+    let renamed = old_name != new_name;
+
+    let existing = column_def_for(client, table, &old_name)?;
+    let fk_clause = single_column_fk_clause_for(client, table, &old_name)?;
+
+    let old_def = column_rewrite_from(old_column);
+    let mut def = ColumnRewrite {
+        data_type: Some(existing.data_type),
+        not_null: existing.not_null,
+        default: existing.default,
+        constraints: old_def.constraints,
+    };
+    // Dialog fields override the schema where the user actually edited.
+    if let Some(raw) = col_field(new_column, &["data_type", "type"])
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        def.data_type = Some(raw.to_string());
+    }
+    if col_field(new_column, &["is_nullable", "nullable"]).is_some() {
+        def.not_null = !col_nullable(new_column);
+    }
+    if col_field(new_column, &["default_value", "column_default", "default"]).is_some() {
+        def.default = col_default(new_column).map(str::to_string);
+    }
+    if let Some(clause) = fk_clause {
+        def.constraints.push(clause);
+    }
+
+    let mut statements = Vec::new();
+    if renamed {
+        statements.push(format!(
+            "ALTER TABLE {} RENAME COLUMN {} TO {}",
+            quote(table),
+            quote(&old_name),
+            quote(&new_name),
+        ));
+    }
+    let data_type = def
+        .data_type
+        .as_deref()
+        .ok_or_else(|| PluginError::invalid_params("column definition needs a 'data_type'"))?;
+    statements.push(build_column_rewrite_sql(table, &new_name, data_type, &def));
+    Ok(statements)
+}
+
+fn build_column_rewrite_sql(
+    table: &str,
+    name: &str,
+    data_type: &str,
+    def: &ColumnRewrite,
+) -> String {
     let mut sql = format!(
         "ALTER TABLE {} ALTER COLUMN {} TO {} {}",
         quote(table),
-        quote(&old_name),
-        quote(&new_name),
+        quote(name),
+        quote(name),
         data_type
     );
-    if let Some(default) = col_default(new_column) {
-        sql.push_str(&format!(" DEFAULT {default}"));
-    }
-    if !col_nullable(new_column) {
+    if def.not_null {
         sql.push_str(" NOT NULL");
     }
-    Ok(sql)
+    if let Some(default) = &def.default {
+        sql.push_str(&format!(" DEFAULT {default}"));
+    }
+    for clause in &def.constraints {
+        sql.push_str(&format!(" {clause}"));
+    }
+    sql
+}
+
+/// The REFERENCES clause of a single-column foreign key on `column`, if any.
+/// Composite (table-level) constraints span several `foreign_key_list` rows
+/// and cannot be expressed as a per-column rewrite, so they are skipped.
+fn single_column_fk_clause_for(
+    client: &Client,
+    table: &str,
+    column: &str,
+) -> Result<Option<String>, PluginError> {
+    let r = client.query(&format!("PRAGMA foreign_key_list({})", quote(table)), &[])?;
+    let matches: Vec<&Vec<Value>> = r
+        .rows
+        .iter()
+        .filter(|row| cell_str(row, 3).as_deref() == Some(column))
+        .collect();
+    if matches.len() != 1 {
+        return Ok(None);
+    }
+    let row = matches[0];
+    let mut clause = format!(
+        "REFERENCES {} ({})",
+        quote(&cell_str(row, 2).unwrap_or_default()),
+        quote(&cell_str(row, 4).unwrap_or_default()),
+    );
+    // foreign_key_list columns: id, seq, table, from, to, on_update, on_delete, match
+    if let Some(action) = cell_str(row, 6).filter(|s| s != "NO ACTION") {
+        clause.push_str(&format!(" ON DELETE {action}"));
+    }
+    if let Some(action) = cell_str(row, 5).filter(|s| s != "NO ACTION") {
+        clause.push_str(&format!(" ON UPDATE {action}"));
+    }
+    Ok(Some(clause))
 }
 
 // ---------------------------------------------------------------------------
@@ -306,11 +483,11 @@ pub fn get_create_foreign_key_sql(id: Value, params: &Value) -> Value {
                 .get("on_update")
                 .and_then(Value::as_str)
                 .map(str::to_string);
-            let col_type = column_type_for(&client, &table, &column)?;
+            let col_def = column_def_for(&client, &table, &column)?;
             Ok(json!([build_create_fk_sql(
                 &table,
                 &column,
-                &col_type,
+                &col_def,
                 &ref_table,
                 &ref_column,
                 on_delete.as_deref(),
@@ -328,7 +505,7 @@ pub fn get_create_foreign_key_sql(id: Value, params: &Value) -> Value {
 fn build_create_fk_sql(
     table: &str,
     column: &str,
-    col_type: &str,
+    def: &ColumnDef,
     ref_table: &str,
     ref_column: &str,
     on_delete: Option<&str>,
@@ -339,7 +516,7 @@ fn build_create_fk_sql(
         quote(table),
         quote(column),
         quote(column),
-        col_type,
+        column_def_sql(def),
         quote(ref_table),
         quote(ref_column),
     );
@@ -373,44 +550,118 @@ pub fn drop_foreign_key(id: Value, params: &Value) -> Value {
             let client = connect(params)?;
             let table = req_str(params, "table")?;
             let fk_name = req_str(params, "fk_name")?;
+            if is_composite_fk(&client, &table, &fk_name)? {
+                return Err(PluginError::invalid_params(format!(
+                    "foreign key '{fk_name}' is a composite (multi-column) constraint; \
+                     the libSQL fork can only drop per-column foreign keys — recreate the table instead"
+                )));
+            }
             let column = foreign_key_column_for(&client, &table, &fk_name)?;
-            let col_type = column_type_for(&client, &table, &column)?;
-            client.execute(&build_fk_drop_sql(&table, &column, &col_type), &[])?;
+            let col_def = column_def_for(&client, &table, &column)?;
+            client.execute(&build_fk_drop_sql(&table, &column, &col_def), &[])?;
             Ok(Value::Null)
         })(),
     )
 }
 
 /// Build a libSQL statement that drops an existing column's foreign key:
-/// the ALTER COLUMN form without the REFERENCES clause.
-fn build_fk_drop_sql(table: &str, column: &str, col_type: &str) -> String {
+/// the ALTER COLUMN form without the REFERENCES clause. The rest of the
+/// column definition is reproduced so the rewrite does not strip NOT NULL,
+/// DEFAULT or anything else the column carries.
+fn build_fk_drop_sql(table: &str, column: &str, def: &ColumnDef) -> String {
     format!(
         "ALTER TABLE {} ALTER COLUMN {} TO {} {}",
         quote(table),
         quote(column),
         quote(column),
-        col_type
+        column_def_sql(def)
     )
 }
 
-/// Look up a column's declared type via `PRAGMA table_info`, defaulting to
-/// TEXT when the type is blank (SQLite's bare-column shorthand).
-fn column_type_for(client: &Client, table: &str, column: &str) -> Result<String, PluginError> {
+/// Composite (table-level) foreign keys appear as several
+/// `PRAGMA foreign_key_list` rows sharing one id — one per column. The fork's
+/// ALTER COLUMN rewrite is per-column and cannot remove them.
+fn is_composite_fk(client: &Client, table: &str, fk_name: &str) -> Result<bool, PluginError> {
+    let r = client.query(&format!("PRAGMA foreign_key_list({})", quote(table)), &[])?;
+    // Each row of a composite FK carries the same id but a different column
+    // name, so the host-side name only matches one row; count the rows that
+    // share the id.
+    let mut target: Option<i64> = None;
+    for row in &r.rows {
+        let id = cell_i64(row, 0);
+        let from = cell_str(row, 3).unwrap_or_default();
+        if format!("fk_{table}_{from}_{id}") == fk_name {
+            target = Some(id);
+            break;
+        }
+    }
+    let Some(target) = target else {
+        // Unknown names are reported by the caller's lookup instead.
+        return Ok(false);
+    };
+    let count = r
+        .rows
+        .iter()
+        .filter(|row| cell_i64(row, 0) == target)
+        .count();
+    Ok(count > 1)
+}
+
+/// A column's existing definition, read from `PRAGMA table_info` (cells:
+/// cid, name, type, notnull, dflt_value, pk).
+struct ColumnDef {
+    data_type: String,
+    not_null: bool,
+    default: Option<String>,
+}
+
+/// Look up a column's declared type and constraints via `PRAGMA table_info`,
+/// defaulting to TEXT when the type is blank (SQLite's bare-column shorthand).
+fn column_def_for(client: &Client, table: &str, column: &str) -> Result<ColumnDef, PluginError> {
     let r = client.query(&format!("PRAGMA table_info({})", quote(table)), &[])?;
     for row in &r.rows {
         // table_info columns: cid, name, type, notnull, dflt_value, pk
         if cell_str(row, 1).as_deref() == Some(column) {
             let raw = cell_str(row, 2).unwrap_or_default();
-            return Ok(if raw.is_empty() {
-                "TEXT".to_string()
-            } else {
-                raw
+            return Ok(ColumnDef {
+                data_type: if raw.is_empty() {
+                    "TEXT".to_string()
+                } else {
+                    raw
+                },
+                not_null: cell_i64(row, 3) != 0,
+                default: cell_raw(row, 4).filter(|s| !s.is_empty()),
             });
         }
     }
     Err(PluginError::invalid_params(format!(
         "column '{column}' not found in table '{table}'"
     )))
+}
+
+/// Render a column definition the way the libSQL ALTER COLUMN form expects:
+/// `TYPE [NOT NULL] [DEFAULT value]`.
+fn column_def_sql(def: &ColumnDef) -> String {
+    let mut sql = def.data_type.clone();
+    if def.not_null {
+        sql.push_str(" NOT NULL");
+    }
+    if let Some(default) = &def.default {
+        sql.push_str(&format!(" DEFAULT {default}"));
+    }
+    sql
+}
+
+/// A PRAGMA cell rendered back to its SQL source text. The libSQL result
+/// converts numbers to JSON numbers, so a `DEFAULT 7` would otherwise come
+/// back as a number and be dropped by the string-only readers.
+fn cell_raw(row: &[Value], i: usize) -> Option<String> {
+    row.get(i).map(|v| match v {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        _ => String::new(),
+    })
 }
 
 /// Map a host-side FK name (plugin-generated `fk_<table>_<column>_<id>`) back
@@ -566,7 +817,7 @@ mod tests {
         let new_col = json!({ "name": "b", "data_type": "TEXT" });
         assert_eq!(
             build_alter_column_sql("t", &old_col, &new_col).unwrap(),
-            "ALTER TABLE \"t\" RENAME COLUMN \"a\" TO \"b\""
+            vec!["ALTER TABLE \"t\" RENAME COLUMN \"a\" TO \"b\""]
         );
     }
 
@@ -576,7 +827,7 @@ mod tests {
         let new_col = json!({ "name": "v", "data_type": "INTEGER" });
         assert_eq!(
             build_alter_column_sql("t", &old_col, &new_col).unwrap(),
-            "ALTER TABLE \"t\" ALTER COLUMN \"v\" TO \"v\" INTEGER"
+            vec!["ALTER TABLE \"t\" ALTER COLUMN \"v\" TO \"v\" INTEGER"]
         );
     }
 
@@ -589,14 +840,53 @@ mod tests {
         });
         assert_eq!(
             build_alter_column_sql("t", &old_col, &new_col).unwrap(),
-            "ALTER TABLE \"t\" ALTER COLUMN \"v\" TO \"v\" TEXT DEFAULT 'hai' NOT NULL"
+            vec!["ALTER TABLE \"t\" ALTER COLUMN \"v\" TO \"v\" TEXT NOT NULL DEFAULT 'hai'"]
         );
     }
 
     #[test]
-    fn alter_column_requires_new_type() {
-        let old_col = json!({ "name": "v", "data_type": "TEXT" });
-        assert!(build_alter_column_sql("t", &old_col, &json!({ "name": "v" })).is_err());
+    fn alter_column_rename_with_retype_emits_both_statements() {
+        let old_col = json!({ "name": "a", "data_type": "TEXT", "is_nullable": true });
+        let new_col = json!({ "name": "b", "data_type": "INTEGER", "is_nullable": false });
+        assert_eq!(
+            build_alter_column_sql("t", &old_col, &new_col).unwrap(),
+            vec![
+                "ALTER TABLE \"t\" RENAME COLUMN \"a\" TO \"b\"",
+                "ALTER TABLE \"t\" ALTER COLUMN \"b\" TO \"b\" INTEGER NOT NULL"
+            ]
+        );
+    }
+
+    #[test]
+    fn alter_column_keeps_old_default_and_not_null_when_omitted() {
+        let old_col = json!({
+            "name": "v", "data_type": "TEXT",
+            "is_nullable": false, "default_value": "'x'"
+        });
+        let new_col = json!({ "name": "v", "data_type": "INTEGER" });
+        assert_eq!(
+            build_alter_column_sql("t", &old_col, &new_col).unwrap(),
+            vec!["ALTER TABLE \"t\" ALTER COLUMN \"v\" TO \"v\" INTEGER NOT NULL DEFAULT 'x'"]
+        );
+    }
+
+    #[test]
+    fn alter_column_inherits_type_when_dialog_omits_it() {
+        let old_col = json!({ "name": "v", "data_type": "TEXT", "is_nullable": true });
+        let new_col = json!({ "name": "v", "is_nullable": false });
+        assert_eq!(
+            build_alter_column_sql("t", &old_col, &new_col).unwrap(),
+            vec!["ALTER TABLE \"t\" ALTER COLUMN \"v\" TO \"v\" TEXT NOT NULL"]
+        );
+    }
+
+    #[test]
+    fn alter_column_no_changes_emits_nothing() {
+        let old_col = json!({ "name": "v", "data_type": "TEXT", "is_nullable": true });
+        let new_col = json!({ "name": "v", "data_type": "TEXT", "is_nullable": true });
+        assert!(build_alter_column_sql("t", &old_col, &new_col)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -605,7 +895,50 @@ mod tests {
         let new_col = json!({ "name": "c", "data_type": "TEXT" });
         assert_eq!(
             build_alter_column_sql("weird\"t", &old_col, &new_col).unwrap(),
-            "ALTER TABLE \"weird\"\"t\" RENAME COLUMN \"a\"\"b\" TO \"c\""
+            vec!["ALTER TABLE \"weird\"\"t\" RENAME COLUMN \"a\"\"b\" TO \"c\""]
+        );
+    }
+
+    #[test]
+    fn alter_column_with_schema_preserves_fk_and_attributes() {
+        let client = in_memory_client();
+        client
+            .execute("CREATE TABLE users(id INT PRIMARY KEY)", &[])
+            .expect("create users");
+        client
+            .execute(
+                "CREATE TABLE emails(user_id INT NOT NULL DEFAULT 7 REFERENCES users(id))",
+                &[],
+            )
+            .expect("create emails");
+        let old_col = json!({ "name": "user_id", "data_type": "INT" });
+        let new_col = json!({ "name": "user_id", "data_type": "BIGINT" });
+        assert_eq!(
+            build_alter_column_sql_with_schema(&client, "emails", &old_col, &new_col).unwrap(),
+            vec!["ALTER TABLE \"emails\" ALTER COLUMN \"user_id\" TO \"user_id\" BIGINT NOT NULL DEFAULT 7 REFERENCES \"users\" (\"id\")"]
+        );
+    }
+
+    #[test]
+    fn alter_column_with_schema_rename_and_retype() {
+        let client = in_memory_client();
+        client
+            .execute("CREATE TABLE users(id INT PRIMARY KEY)", &[])
+            .expect("create users");
+        client
+            .execute(
+                "CREATE TABLE emails(user_id INT NOT NULL DEFAULT 7 REFERENCES users(id))",
+                &[],
+            )
+            .expect("create emails");
+        let old_col = json!({ "name": "user_id", "data_type": "INT" });
+        let new_col = json!({ "name": "owner_id", "data_type": "BIGINT" });
+        assert_eq!(
+            build_alter_column_sql_with_schema(&client, "emails", &old_col, &new_col).unwrap(),
+            vec![
+                "ALTER TABLE \"emails\" RENAME COLUMN \"user_id\" TO \"owner_id\"",
+                "ALTER TABLE \"emails\" ALTER COLUMN \"owner_id\" TO \"owner_id\" BIGINT NOT NULL DEFAULT 7 REFERENCES \"users\" (\"id\")"
+            ]
         );
     }
 
@@ -649,33 +982,61 @@ mod tests {
 
     #[test]
     fn create_foreign_key_builder_emits_libsql_alter_column() {
+        let def = ColumnDef {
+            data_type: "INT".into(),
+            not_null: false,
+            default: None,
+        };
         assert_eq!(
-            build_create_fk_sql(
-                "emails",
-                "user_id",
-                "INT",
-                "users",
-                "id",
-                None,
-                None,
-            ),
+            build_create_fk_sql("emails", "user_id", &def, "users", "id", None, None),
             "ALTER TABLE \"emails\" ALTER COLUMN \"user_id\" TO \"user_id\" INT REFERENCES \"users\" (\"id\")"
         );
     }
 
     #[test]
     fn create_foreign_key_builder_appends_referential_actions() {
+        let def = ColumnDef {
+            data_type: "INT".into(),
+            not_null: false,
+            default: None,
+        };
         assert_eq!(
             build_create_fk_sql(
                 "emails",
                 "user_id",
-                "INT",
+                &def,
                 "users",
                 "id",
                 Some("CASCADE"),
                 Some("SET NULL"),
             ),
             "ALTER TABLE \"emails\" ALTER COLUMN \"user_id\" TO \"user_id\" INT REFERENCES \"users\" (\"id\") ON DELETE CASCADE ON UPDATE SET NULL"
+        );
+    }
+
+    #[test]
+    fn create_foreign_key_builder_keeps_not_null_and_default() {
+        let def = ColumnDef {
+            data_type: "INT".into(),
+            not_null: true,
+            default: Some("7".into()),
+        };
+        assert_eq!(
+            build_create_fk_sql("emails", "user_id", &def, "users", "id", None, None),
+            "ALTER TABLE \"emails\" ALTER COLUMN \"user_id\" TO \"user_id\" INT NOT NULL DEFAULT 7 REFERENCES \"users\" (\"id\")"
+        );
+    }
+
+    #[test]
+    fn drop_foreign_key_builder_keeps_not_null_and_default() {
+        let def = ColumnDef {
+            data_type: "INT".into(),
+            not_null: true,
+            default: Some("7".into()),
+        };
+        assert_eq!(
+            build_fk_drop_sql("emails", "user_id", &def),
+            "ALTER TABLE \"emails\" ALTER COLUMN \"user_id\" TO \"user_id\" INT NOT NULL DEFAULT 7"
         );
     }
 
@@ -776,31 +1137,118 @@ mod tests {
     }
 
     #[test]
-    fn column_type_for_reads_pragma() {
+    fn column_def_for_reads_pragma() {
         let client = in_memory_client();
         client
-            .execute("CREATE TABLE t(v TEXT, n INTEGER)", &[])
+            .execute(
+                "CREATE TABLE t(v TEXT NOT NULL DEFAULT 'x', n INTEGER)",
+                &[],
+            )
             .expect("create table");
-        assert_eq!(column_type_for(&client, "t", "v").unwrap(), "TEXT");
-        assert_eq!(column_type_for(&client, "t", "n").unwrap(), "INTEGER");
+        let v = column_def_for(&client, "t", "v").unwrap();
+        assert_eq!(v.data_type, "TEXT");
+        assert!(v.not_null);
+        assert_eq!(v.default.as_deref(), Some("'x'"));
+        let n = column_def_for(&client, "t", "n").unwrap();
+        assert_eq!(n.data_type, "INTEGER");
+        assert!(!n.not_null);
+        assert_eq!(n.default, None);
     }
 
     #[test]
-    fn column_type_for_defaults_blank_type_to_text() {
+    fn column_def_for_keeps_numeric_default() {
+        let client = in_memory_client();
+        client
+            .execute("CREATE TABLE t(v INT NOT NULL DEFAULT 7)", &[])
+            .expect("create table");
+        let v = column_def_for(&client, "t", "v").unwrap();
+        assert!(v.not_null);
+        assert_eq!(v.default.as_deref(), Some("7"));
+    }
+
+    #[test]
+    fn column_def_for_defaults_blank_type_to_text() {
         let client = in_memory_client();
         client
             .execute("CREATE TABLE t(v)", &[])
             .expect("create table");
-        assert_eq!(column_type_for(&client, "t", "v").unwrap(), "TEXT");
+        assert_eq!(column_def_for(&client, "t", "v").unwrap().data_type, "TEXT");
     }
 
     #[test]
-    fn column_type_for_missing_column_errors() {
+    fn column_def_for_missing_column_errors() {
         let client = in_memory_client();
         client
             .execute("CREATE TABLE t(v TEXT)", &[])
             .expect("create table");
-        assert!(column_type_for(&client, "t", "nope").is_err());
+        assert!(column_def_for(&client, "t", "nope").is_err());
+    }
+
+    #[test]
+    fn drop_foreign_key_local_keeps_not_null_and_default() {
+        let (client, path) = temp_file_client();
+        client
+            .execute("CREATE TABLE users(id INT PRIMARY KEY)", &[])
+            .expect("create users");
+        client
+            .execute(
+                "CREATE TABLE emails(user_id INT NOT NULL DEFAULT 7 REFERENCES users(id))",
+                &[],
+            )
+            .expect("create emails");
+        let resp = drop_foreign_key(
+            json!(1),
+            &json!({
+                "params": { "database": path },
+                "table": "emails",
+                "fk_name": "fk_emails_user_id_0"
+            }),
+        );
+        assert!(resp.get("error").is_none(), "unexpected error: {resp}");
+        let after = client
+            .query("PRAGMA foreign_key_list(emails)", &[])
+            .expect("pragma");
+        assert!(after.rows.is_empty(), "FK should be gone");
+        let info = client
+            .query("PRAGMA table_info(emails)", &[])
+            .expect("pragma");
+        let user_id = &info.rows[0];
+        assert_eq!(cell_str(user_id, 1).as_deref(), Some("user_id"));
+        assert_eq!(cell_str(user_id, 2).as_deref(), Some("INT"));
+        assert_eq!(cell_i64(user_id, 3), 1, "NOT NULL must survive");
+        assert_eq!(
+            cell_str(user_id, 4).as_deref(),
+            Some("7"),
+            "DEFAULT must survive"
+        );
+    }
+
+    #[test]
+    fn drop_composite_foreign_key_errors_instead_of_silently_succeeding() {
+        let (client, path) = temp_file_client();
+        client
+            .execute("CREATE TABLE p(x INT, y INT, PRIMARY KEY(x, y))", &[])
+            .expect("create p");
+        client
+            .execute(
+                "CREATE TABLE c(a INT, b INT, FOREIGN KEY(a, b) REFERENCES p(x, y))",
+                &[],
+            )
+            .expect("create c");
+        let resp = drop_foreign_key(
+            json!(1),
+            &json!({
+                "params": { "database": path },
+                "table": "c",
+                "fk_name": "fk_c_a_0"
+            }),
+        );
+        let err = resp["error"]["message"].as_str().expect("error message");
+        assert!(err.contains("composite"), "unexpected error: {err}");
+        let after = client
+            .query("PRAGMA foreign_key_list(c)", &[])
+            .expect("pragma");
+        assert_eq!(after.rows.len(), 2, "FK must remain untouched");
     }
 
     #[test]
