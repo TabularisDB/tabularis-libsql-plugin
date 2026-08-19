@@ -117,12 +117,8 @@ plugins folder (the location Tabularis actually scans — derived from
 `ProjectDirs::from("com", "debba", "tabularis")`):
 
 - **Linux:** `~/.local/share/tabularis/plugins/libsql/`
-- **macOS:** `~/Library/Application Support/com.debba.tabularis/plugins/libsql/`
-- **Windows:** `%APPDATA%\debba\tabularis\data\plugins\libsql\`
-
-Note: the plugin guide's plain `%APPDATA%\tabularis\plugins` / macOS
-`tabularis/plugins` paths are wrong — that folder holds app config, not
-plugins; Tabularis scans the ProjectDirs path above.
+- **macOS:** `~/Library/Application Support/tabularis/plugins/libsql/`
+- **Windows:** `%APPDATA%\tabularis\plugins\libsql\`
 
 Restart Tabularis (or toggle the plugin in Settings) and **libSQL** appears in
 the Database Type list.
