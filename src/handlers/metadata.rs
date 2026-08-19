@@ -125,26 +125,35 @@ fn triggers_for(client: &Client) -> Result<Vec<Value>, PluginError> {
 }
 
 fn trigger_timing_event(sql: &str) -> (String, String) {
-    let upper = sql.to_uppercase();
-    let timing = if upper.contains("INSTEAD OF") {
-        "INSTEAD OF"
-    } else if upper.contains("BEFORE") {
-        "BEFORE"
-    } else if upper.contains("AFTER") {
-        "AFTER"
-    } else {
-        ""
-    };
-    let event = if upper.contains("INSERT") {
-        "INSERT"
-    } else if upper.contains("UPDATE") {
-        "UPDATE"
-    } else if upper.contains("DELETE") {
-        "DELETE"
-    } else {
-        ""
-    };
-    (timing.to_string(), event.to_string())
+    // Classify from the header only (up to the `BEGIN` keyword): a trigger
+    // body can contain the same keywords — an audit trigger fires
+    // AFTER UPDATE but INSERTs into a log table — and must not override the
+    // header's timing/event.
+    let mut timing = String::new();
+    let mut event = String::new();
+    for token in sql.split_whitespace() {
+        if token.eq_ignore_ascii_case("begin") {
+            break;
+        }
+        let upper = token.to_ascii_uppercase();
+        if timing.is_empty() {
+            match upper.as_str() {
+                "BEFORE" => timing = "BEFORE".to_string(),
+                "AFTER" => timing = "AFTER".to_string(),
+                "INSTEAD" => timing = "INSTEAD OF".to_string(),
+                _ => {}
+            }
+        }
+        if event.is_empty() {
+            match upper.as_str() {
+                "INSERT" => event = "INSERT".to_string(),
+                "UPDATE" => event = "UPDATE".to_string(),
+                "DELETE" => event = "DELETE".to_string(),
+                _ => {}
+            }
+        }
+    }
+    (timing, event)
 }
 
 fn list_views(client: &Client) -> Result<Vec<Value>, PluginError> {
@@ -470,6 +479,31 @@ mod tests {
         assert_eq!(
             trigger_timing_event("CREATE TRIGGER x AFTER INSERT ON t BEGIN END"),
             ("AFTER".into(), "INSERT".into())
+        );
+    }
+
+    #[test]
+    fn trigger_header_wins_over_body_keywords() {
+        // An audit trigger fires AFTER UPDATE but INSERTs into a log table;
+        // the body keyword must not override the header.
+        assert_eq!(
+            trigger_timing_event(
+                "CREATE TRIGGER trg_audit AFTER UPDATE ON users \
+                 BEGIN INSERT INTO audit_log(user_id) VALUES (NEW.id); END"
+            ),
+            ("AFTER".into(), "UPDATE".into())
+        );
+        assert_eq!(
+            trigger_timing_event(
+                "CREATE TRIGGER trg_x BEFORE INSERT ON t \
+                 BEGIN DELETE FROM t WHERE id = NEW.id; END"
+            ),
+            ("BEFORE".into(), "INSERT".into())
+        );
+        // `begin` inside an identifier is not the BEGIN keyword.
+        assert_eq!(
+            trigger_timing_event("CREATE TRIGGER mybegin AFTER UPDATE ON t BEGIN END"),
+            ("AFTER".into(), "UPDATE".into())
         );
     }
 }
