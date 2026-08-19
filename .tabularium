@@ -1,5 +1,5 @@
 {
-  "name": "libsql",
+  "name": "LibSQL",
   "version": "0.1.0",
   "kind": "driver",
   "description": "libSQL / Turso driver. Connects to local libSQL/SQLite files (embedded libSQL fork: ALTER COLUMN and foreign-key add/drop work locally) and to remote Turso or sqld servers over the Hrana HTTP protocol.",
@@ -7,7 +7,7 @@
   "paradigms": [
     "sql"
   ],
-  "icon": "sqlite",
+  "icon": "https://raw.githubusercontent.com/TabularisDB/tabularis-libsql-plugin/main/assets/icon.svg",
   "color": "#4ff8d2",
   "default_username": "",
   "executable": "libsql-plugin",
