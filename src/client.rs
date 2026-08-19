@@ -64,7 +64,7 @@ impl Client {
         match self {
             Client::Local(conn) => {
                 let libsql_args: Vec<LibsqlValue> = args.iter().map(json_to_libsql).collect();
-                futures::executor::block_on(conn.execute(sql, libsql_args)).map_err(Into::into)
+                futures_executor::block_on(conn.execute(sql, libsql_args)).map_err(Into::into)
             }
             Client::Remote(client) => Ok(client.execute(sql, args)?.affected),
         }
@@ -80,7 +80,7 @@ impl Client {
 /// the crate's API but does its work synchronously, so `block_on` is a
 /// straight bridge — no runtime threads, matching the plugin's sync stdio loop.
 fn open_local(path: &str) -> Result<LibsqlConnection, PluginError> {
-    let db = futures::executor::block_on(libsql::Builder::new_local(path).build())
+    let db = futures_executor::block_on(libsql::Builder::new_local(path).build())
         .map_err(|e| PluginError::internal(format!("cannot open libSQL file '{path}': {e}")))?;
     db.connect()
         .map_err(|e| PluginError::internal(format!("cannot open libSQL file '{path}': {e}")))
@@ -92,14 +92,14 @@ fn local_query(
     args: &[Value],
 ) -> Result<QueryResult, PluginError> {
     let libsql_args: Vec<LibsqlValue> = args.iter().map(json_to_libsql).collect();
-    let mut rows = futures::executor::block_on(conn.query(sql, libsql_args))?;
+    let mut rows = futures_executor::block_on(conn.query(sql, libsql_args))?;
     let columns: Vec<String> = (0..rows.column_count())
         .map(|i| rows.column_name(i).unwrap_or("").to_string())
         .collect();
     let ncol = columns.len();
 
     let mut out_rows = Vec::new();
-    while let Some(row) = futures::executor::block_on(rows.next())? {
+    while let Some(row) = futures_executor::block_on(rows.next())? {
         let mut cells = Vec::with_capacity(ncol);
         for i in 0..ncol {
             let value = row.get_value(i as i32)?;
