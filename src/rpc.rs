@@ -31,6 +31,7 @@ pub fn handle_line(line: &str) -> Value {
         "get_foreign_keys" => handlers::metadata::get_foreign_keys(id, &params),
         "get_indexes" => handlers::metadata::get_indexes(id, &params),
         "get_views" => handlers::metadata::get_views(id, &params),
+        "get_triggers" => handlers::metadata::get_triggers(id, &params),
         "get_view_definition" => handlers::metadata::get_view_definition(id, &params),
         "get_view_columns" => handlers::metadata::get_view_columns(id, &params),
         "get_routines" => handlers::metadata::get_routines(id, &params),
@@ -116,14 +117,77 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_ddl_reports_clear_error() {
-        let resp = handle_line(
-            r#"{"jsonrpc":"2.0","method":"get_create_foreign_key_sql","params":{"params":{}},"id":1}"#,
+    fn create_foreign_key_local_works_through_the_fork() {
+        // Local files run the embedded libSQL fork, so ALTER COLUMN works.
+        let db = format!(
+            "{}/libsql_plugin_rpc_test_{}.db",
+            std::env::temp_dir().display(),
+            std::process::id()
         );
-        assert_eq!(resp["error"]["code"], -32601);
-        assert!(resp["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("foreign key"));
+        let mk = |sql: &str| {
+            let request = json!({
+                "jsonrpc": "2.0",
+                "method": "execute_query",
+                "params": { "params": { "database": db }, "query": sql, "limit": null, "page": 1, "schema": null },
+                "id": 1,
+            });
+            let resp = handle_line(&request.to_string());
+            assert!(resp.get("error").is_none(), "setup failed: {resp}");
+        };
+        mk("CREATE TABLE users(id INT PRIMARY KEY)");
+        mk("CREATE TABLE emails(user_id INT)");
+
+        let request = json!({
+            "jsonrpc": "2.0",
+            "method": "get_create_foreign_key_sql",
+            "params": {
+                "params": { "database": db },
+                "table": "emails",
+                "fk_name": "fk_emails_user_id_0",
+                "column": "user_id",
+                "ref_table": "users",
+                "ref_column": "id",
+                "schema": null
+            },
+            "id": 1,
+        });
+        let resp = handle_line(&request.to_string());
+        assert_eq!(
+            resp["result"],
+            json!(["ALTER TABLE \"emails\" ALTER COLUMN \"user_id\" TO \"user_id\" INT REFERENCES \"users\" (\"id\")"])
+        );
+    }
+
+    #[test]
+    fn alter_column_sql_builds_without_connection_params() {
+        // The host calls the SQL builders without any connection params.
+        let resp = handle_line(
+            r#"{"jsonrpc":"2.0","method":"get_alter_column_sql","params":{"table":"t","old_column":{"name":"v","data_type":"TEXT"},"new_column":{"name":"v","data_type":"INTEGER"},"schema":null},"id":1}"#,
+        );
+        assert_eq!(
+            resp["result"],
+            json!(["ALTER TABLE \"t\" ALTER COLUMN \"v\" TO \"v\" INTEGER"])
+        );
+    }
+
+    #[test]
+    fn create_table_sql_builds_from_host_payload() {
+        let resp = handle_line(
+            r#"{"jsonrpc":"2.0","method":"get_create_table_sql","params":{"table_name":"blog","columns":[{"name":"id","data_type":"INTEGER","is_pk":true,"is_auto_increment":true,"is_nullable":false,"default_value":null}],"schema":null},"id":1}"#,
+        );
+        assert_eq!(
+            resp["result"],
+            json!(["CREATE TABLE \"blog\" (\n  \"id\" INTEGER PRIMARY KEY AUTOINCREMENT\n)"])
+        );
+    }
+
+    #[test]
+    fn execute_query_response_matches_host_query_result_contract() {
+        let resp = handle_line(
+            r#"{"jsonrpc":"2.0","method":"execute_query","params":{"params":{"database":":memory:"},"query":"SELECT 1 AS n","limit":null,"page":1,"schema":null},"id":1}"#,
+        );
+        assert!(resp["result"]["affected_rows"].is_number());
+        assert_eq!(resp["result"]["truncated"], false);
+        assert!(resp["result"]["pagination"].is_null());
     }
 }

@@ -4,7 +4,9 @@
 //! connection form. All fields are optional because libSQL is dual-mode: a
 //! local connection only fills `database` (a file path), while a remote Turso
 //! connection fills `host`/`database` with a URL and `password` with the auth
-//! token.
+//! token. Drivers with the `connection_uri` capability receive the raw URI
+//! verbatim in `connection_uri`; when present it is authoritative over the
+//! decomposed fields.
 
 use serde_json::Value;
 
@@ -17,6 +19,7 @@ pub struct ConnectionParams {
     pub username: Option<String>,
     pub password: Option<String>,
     pub ssl_mode: Option<String>,
+    pub connection_uri: Option<String>,
 }
 
 impl ConnectionParams {
@@ -45,6 +48,7 @@ impl ConnectionParams {
             username: get_str("username"),
             password: get_str("password"),
             ssl_mode: get_str("ssl_mode"),
+            connection_uri: get_str("connection_uri"),
         }
     }
 }

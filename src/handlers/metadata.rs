@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 
 use crate::client::Client;
 use crate::error::PluginError;
-use crate::handlers::{cell, cell_i64, cell_str, connect, req_str, respond};
+use crate::handlers::{cell, cell_i64, cell_str, connect, fk_name, req_str, respond};
 use crate::utils::identifiers::quote;
 
 // ---------------------------------------------------------------------------
@@ -29,7 +29,6 @@ fn columns_for(client: &Client, table: &str) -> Result<Vec<Value>, PluginError> 
         let name = cell_str(row, 1).unwrap_or_default();
         let raw_type = cell_str(row, 2).unwrap_or_default();
         let not_null = cell_i64(row, 3) != 0;
-        let default = cell(row, 4);
         let pk = cell_i64(row, 5) != 0;
         // INTEGER PRIMARY KEY is a rowid alias and behaves as auto-increment.
         let auto_increment = pk && raw_type.to_ascii_uppercase().contains("INT");
@@ -42,11 +41,10 @@ fn columns_for(client: &Client, table: &str) -> Result<Vec<Value>, PluginError> 
         columns.push(json!({
             "name": name,
             "data_type": data_type,
+            "is_pk": pk,
             "is_nullable": !not_null,
-            "column_default": default,
-            "is_primary_key": pk,
             "is_auto_increment": auto_increment,
-            "comment": Value::Null,
+            "default_value": cell_str(row, 4),
         }));
     }
     Ok(columns)
@@ -62,10 +60,10 @@ fn foreign_keys_for(client: &Client, table: &str) -> Result<Vec<Value>, PluginEr
         let from = cell_str(row, 3).unwrap_or_default();
         let to = cell_str(row, 4).unwrap_or_default();
         fks.push(json!({
-            "constraint_name": format!("fk_{table}_{from}_{id}"),
+            "name": fk_name(table, &from, id),
             "column_name": from,
-            "referenced_table": ref_table,
-            "referenced_column": to,
+            "ref_table": ref_table,
+            "ref_column": to,
             "on_update": cell(row, 5),
             "on_delete": cell(row, 6),
         }));
@@ -102,6 +100,60 @@ fn indexes_for(client: &Client, table: &str) -> Result<Vec<Value>, PluginError> 
         }));
     }
     Ok(indexes)
+}
+
+fn triggers_for(client: &Client) -> Result<Vec<Value>, PluginError> {
+    let r = client.query(
+        "SELECT name, tbl_name, sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name",
+        &[],
+    )?;
+    Ok(r.rows
+        .iter()
+        .filter_map(|row| {
+            let name = cell_str(row, 0)?;
+            let sql = cell_str(row, 2).unwrap_or_default();
+            let (timing, event) = trigger_timing_event(&sql);
+            Some(json!({
+                "name": name,
+                "table_name": cell_str(row, 1).unwrap_or_default(),
+                "event": event,
+                "timing": timing,
+                "definition": cell_str(row, 2),
+            }))
+        })
+        .collect())
+}
+
+fn trigger_timing_event(sql: &str) -> (String, String) {
+    // Classify from the header only (up to the `BEGIN` keyword): a trigger
+    // body can contain the same keywords — an audit trigger fires
+    // AFTER UPDATE but INSERTs into a log table — and must not override the
+    // header's timing/event.
+    let mut timing = String::new();
+    let mut event = String::new();
+    for token in sql.split_whitespace() {
+        if token.eq_ignore_ascii_case("begin") {
+            break;
+        }
+        let upper = token.to_ascii_uppercase();
+        if timing.is_empty() {
+            match upper.as_str() {
+                "BEFORE" => timing = "BEFORE".to_string(),
+                "AFTER" => timing = "AFTER".to_string(),
+                "INSTEAD" => timing = "INSTEAD OF".to_string(),
+                _ => {}
+            }
+        }
+        if event.is_empty() {
+            match upper.as_str() {
+                "INSERT" => event = "INSERT".to_string(),
+                "UPDATE" => event = "UPDATE".to_string(),
+                "DELETE" => event = "DELETE".to_string(),
+                _ => {}
+            }
+        }
+    }
+    (timing, event)
 }
 
 fn list_views(client: &Client) -> Result<Vec<Value>, PluginError> {
@@ -172,6 +224,14 @@ pub fn get_indexes(id: Value, params: &Value) -> Value {
 
 pub fn get_views(id: Value, params: &Value) -> Value {
     respond(id, connect(params).and_then(|c| Ok(json!(list_views(&c)?))))
+}
+
+pub fn get_triggers(id: Value, params: &Value) -> Value {
+    // SQLite/libSQL has a single schema; the host's `schema` param is ignored.
+    respond(
+        id,
+        connect(params).and_then(|c| Ok(json!(triggers_for(&c)?))),
+    )
 }
 
 pub fn get_view_definition(id: Value, params: &Value) -> Value {
@@ -312,4 +372,138 @@ fn batch_impl(
         out.insert(table.clone(), json!(extract(&client, &table)?));
     }
     Ok(Value::Object(out))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::Client;
+    use crate::models::ConnectionParams;
+
+    fn in_memory_client() -> Client {
+        let cp = ConnectionParams {
+            database: Some(":memory:".into()),
+            ..Default::default()
+        };
+        Client::connect(&cp).expect("in-memory connection")
+    }
+
+    #[test]
+    fn columns_use_host_contract_keys() {
+        let client = in_memory_client();
+        client
+            .execute(
+                "CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL DEFAULT 'anon')",
+                &[],
+            )
+            .expect("create users");
+
+        let cols = columns_for(&client, "users").expect("columns");
+        assert_eq!(cols.len(), 2);
+
+        let id = &cols[0];
+        assert_eq!(id["name"], "id");
+        assert_eq!(id["data_type"], "INTEGER");
+        assert_eq!(id["is_pk"], true);
+        assert_eq!(id["is_nullable"], true);
+        assert_eq!(id["is_auto_increment"], true);
+        assert!(id.get("default_value").unwrap().is_null());
+
+        let name = &cols[1];
+        assert_eq!(name["is_pk"], false);
+        assert_eq!(name["is_nullable"], false);
+        assert_eq!(name["is_auto_increment"], false);
+        assert_eq!(name["default_value"], "'anon'");
+    }
+
+    #[test]
+    fn foreign_keys_use_host_contract_keys() {
+        let client = in_memory_client();
+        client
+            .execute("CREATE TABLE users(id INT PRIMARY KEY)", &[])
+            .expect("create users");
+        client
+            .execute(
+                "CREATE TABLE emails(user_id INT REFERENCES users(id) ON DELETE CASCADE)",
+                &[],
+            )
+            .expect("create emails");
+
+        let fks = foreign_keys_for(&client, "emails").expect("foreign keys");
+        assert_eq!(fks.len(), 1);
+        let fk = &fks[0];
+        assert_eq!(fk["name"], "fk_emails_user_id_0");
+        assert_eq!(fk["column_name"], "user_id");
+        assert_eq!(fk["ref_table"], "users");
+        assert_eq!(fk["ref_column"], "id");
+        assert_eq!(fk["on_delete"], "CASCADE");
+        assert_eq!(fk["on_update"], "NO ACTION");
+    }
+
+    #[test]
+    fn triggers_use_host_contract_keys() {
+        let client = in_memory_client();
+        client
+            .execute("CREATE TABLE t(id INT)", &[])
+            .expect("create t");
+        client
+            .execute(
+                "CREATE TRIGGER trg_after_ins AFTER INSERT ON t BEGIN UPDATE t SET id = 1; END",
+                &[],
+            )
+            .expect("create trigger");
+
+        let triggers = triggers_for(&client).expect("triggers");
+        assert_eq!(triggers.len(), 1);
+        let trg = &triggers[0];
+        assert_eq!(trg["name"], "trg_after_ins");
+        assert_eq!(trg["table_name"], "t");
+        assert_eq!(trg["timing"], "AFTER");
+        assert_eq!(trg["event"], "INSERT");
+        assert!(trg["definition"]
+            .as_str()
+            .unwrap()
+            .starts_with("CREATE TRIGGER"));
+    }
+
+    #[test]
+    fn trigger_timing_and_event_parse_heuristics() {
+        assert_eq!(
+            trigger_timing_event("CREATE TRIGGER x BEFORE UPDATE ON t BEGIN END"),
+            ("BEFORE".into(), "UPDATE".into())
+        );
+        assert_eq!(
+            trigger_timing_event("CREATE TRIGGER x INSTEAD OF DELETE ON v BEGIN END"),
+            ("INSTEAD OF".into(), "DELETE".into())
+        );
+        assert_eq!(
+            trigger_timing_event("CREATE TRIGGER x AFTER INSERT ON t BEGIN END"),
+            ("AFTER".into(), "INSERT".into())
+        );
+    }
+
+    #[test]
+    fn trigger_header_wins_over_body_keywords() {
+        // An audit trigger fires AFTER UPDATE but INSERTs into a log table;
+        // the body keyword must not override the header.
+        assert_eq!(
+            trigger_timing_event(
+                "CREATE TRIGGER trg_audit AFTER UPDATE ON users \
+                 BEGIN INSERT INTO audit_log(user_id) VALUES (NEW.id); END"
+            ),
+            ("AFTER".into(), "UPDATE".into())
+        );
+        assert_eq!(
+            trigger_timing_event(
+                "CREATE TRIGGER trg_x BEFORE INSERT ON t \
+                 BEGIN DELETE FROM t WHERE id = NEW.id; END"
+            ),
+            ("BEFORE".into(), "INSERT".into())
+        );
+        // `begin` inside an identifier is not the BEGIN keyword.
+        assert_eq!(
+            trigger_timing_event("CREATE TRIGGER mybegin AFTER UPDATE ON t BEGIN END"),
+            ("AFTER".into(), "UPDATE".into())
+        );
+    }
 }

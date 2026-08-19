@@ -2,8 +2,8 @@
 //! expose a single `query`/`execute` surface the handlers can use without
 //! caring whether the database is a local file or a remote Turso server.
 
-use rusqlite::types::Value as SqliteValue;
-use rusqlite::Connection;
+use libsql::Connection as LibsqlConnection;
+use libsql::Value as LibsqlValue;
 use serde_json::{json, Value};
 
 use crate::error::PluginError;
@@ -13,7 +13,8 @@ use crate::models::ConnectionParams;
 /// Where a connection actually points.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Backend {
-    /// Local libSQL/SQLite file (or `:memory:`).
+    /// Local libSQL/SQLite file (or `:memory:`), opened through the libSQL
+    /// fork of SQLite so fork extensions (ALTER COLUMN, FK add) work locally.
     Local(String),
     /// Remote Turso / sqld server reachable over Hrana HTTP.
     Remote { url: String, token: Option<String> },
@@ -31,19 +32,14 @@ pub struct QueryResult {
 /// stateless (each call is an independent HTTP request), so there is no shared
 /// mutable state to manage.
 pub enum Client {
-    Local(Connection),
+    Local(LibsqlConnection),
     Remote(HranaClient),
 }
 
 impl Client {
     pub fn connect(params: &ConnectionParams) -> Result<Self, PluginError> {
         match resolve_backend(params)? {
-            Backend::Local(path) => {
-                let conn = Connection::open(&path).map_err(|e| {
-                    PluginError::internal(format!("cannot open libSQL file '{path}': {e}"))
-                })?;
-                Ok(Client::Local(conn))
-            }
+            Backend::Local(path) => Ok(Client::Local(open_local(&path)?)),
             Backend::Remote { url, token } => Ok(Client::Remote(HranaClient::new(url, token))),
         }
     }
@@ -67,10 +63,8 @@ impl Client {
     pub fn execute(&self, sql: &str, args: &[Value]) -> Result<u64, PluginError> {
         match self {
             Client::Local(conn) => {
-                let sqlite_args = to_sqlite_params(args);
-                let mut stmt = conn.prepare(sql)?;
-                let affected = stmt.execute(rusqlite::params_from_iter(sqlite_args.iter()))?;
-                Ok(affected as u64)
+                let libsql_args: Vec<LibsqlValue> = args.iter().map(json_to_libsql).collect();
+                futures_executor::block_on(conn.execute(sql, libsql_args)).map_err(Into::into)
             }
             Client::Remote(client) => Ok(client.execute(sql, args)?.affected),
         }
@@ -82,22 +76,42 @@ impl Client {
     }
 }
 
-fn local_query(conn: &Connection, sql: &str, args: &[Value]) -> Result<QueryResult, PluginError> {
-    let sqlite_args = to_sqlite_params(args);
-    let mut stmt = conn.prepare(sql)?;
-    let columns: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+/// Open a local file through the embedded libSQL fork. `build()` is async in
+/// the crate's API but does its work synchronously, so `block_on` is a
+/// straight bridge — no runtime threads, matching the plugin's sync stdio loop.
+fn open_local(path: &str) -> Result<LibsqlConnection, PluginError> {
+    let db = futures_executor::block_on(libsql::Builder::new_local(path).build())
+        .map_err(|e| PluginError::internal(format!("cannot open libSQL file '{path}': {e}")))?;
+    db.connect()
+        .map_err(|e| PluginError::internal(format!("cannot open libSQL file '{path}': {e}")))
+}
+
+fn local_query(
+    conn: &LibsqlConnection,
+    sql: &str,
+    args: &[Value],
+) -> Result<QueryResult, PluginError> {
+    let libsql_args: Vec<LibsqlValue> = args.iter().map(json_to_libsql).collect();
+    let mut rows = futures_executor::block_on(conn.query(sql, libsql_args))?;
+    let columns: Vec<String> = (0..rows.column_count())
+        .map(|i| rows.column_name(i).unwrap_or("").to_string())
+        .collect();
     let ncol = columns.len();
 
-    let mut out_rows = Vec::new();
-    let mut rows = stmt.query(rusqlite::params_from_iter(sqlite_args.iter()))?;
-    while let Some(row) = rows.next()? {
-        let mut cells = Vec::with_capacity(ncol);
-        for i in 0..ncol {
-            let value: SqliteValue = row.get(i)?;
-            cells.push(sqlite_to_json(value));
+    // One executor for the whole fetch loop: block_on per row would tear down
+    // and rebuild the waker/parker machinery for every row on the hot path.
+    let out_rows = futures_executor::block_on(async {
+        let mut out_rows = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let mut cells = Vec::with_capacity(ncol);
+            for i in 0..ncol {
+                let value = row.get_value(i as i32)?;
+                cells.push(libsql_value_to_json(value));
+            }
+            out_rows.push(cells);
         }
-        out_rows.push(cells);
-    }
+        Ok::<_, PluginError>(out_rows)
+    })?;
 
     Ok(QueryResult {
         columns,
@@ -106,37 +120,33 @@ fn local_query(conn: &Connection, sql: &str, args: &[Value]) -> Result<QueryResu
     })
 }
 
-fn to_sqlite_params(args: &[Value]) -> Vec<SqliteValue> {
-    args.iter().map(json_to_sqlite).collect()
-}
-
-fn json_to_sqlite(value: &Value) -> SqliteValue {
+fn json_to_libsql(value: &Value) -> LibsqlValue {
     match value {
-        Value::Null => SqliteValue::Null,
-        Value::Bool(b) => SqliteValue::Integer(if *b { 1 } else { 0 }),
+        Value::Null => LibsqlValue::Null,
+        Value::Bool(b) => LibsqlValue::Integer(if *b { 1 } else { 0 }),
         Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                SqliteValue::Integer(i)
+                LibsqlValue::Integer(i)
             } else if let Some(f) = n.as_f64() {
-                SqliteValue::Real(f)
+                LibsqlValue::Real(f)
             } else {
-                SqliteValue::Text(n.to_string())
+                LibsqlValue::Text(n.to_string())
             }
         }
-        Value::String(s) => SqliteValue::Text(s.clone()),
-        other => SqliteValue::Text(other.to_string()),
+        Value::String(s) => LibsqlValue::Text(s.clone()),
+        other => LibsqlValue::Text(other.to_string()),
     }
 }
 
-fn sqlite_to_json(value: SqliteValue) -> Value {
+fn libsql_value_to_json(value: LibsqlValue) -> Value {
     use base64::engine::general_purpose::STANDARD;
     use base64::Engine;
     match value {
-        SqliteValue::Null => Value::Null,
-        SqliteValue::Integer(i) => json!(i),
-        SqliteValue::Real(f) => json!(f),
-        SqliteValue::Text(s) => Value::String(s),
-        SqliteValue::Blob(b) => Value::String(STANDARD.encode(b)),
+        LibsqlValue::Null => Value::Null,
+        LibsqlValue::Integer(i) => json!(i),
+        LibsqlValue::Real(f) => json!(f),
+        LibsqlValue::Text(s) => Value::String(s),
+        LibsqlValue::Blob(b) => Value::String(STANDARD.encode(b)),
     }
 }
 
@@ -160,6 +170,23 @@ fn is_url(s: &str) -> bool {
 
 /// Decide which backend a set of connection params points at.
 pub fn resolve_backend(params: &ConnectionParams) -> Result<Backend, PluginError> {
+    // 0. The raw connection URI is authoritative when the host passes it
+    // through (drivers with the `connection_uri` capability). The host still
+    // fills `host` from the same URI, but rebuilding the URL from the
+    // decomposed fields would drop the query string — and with it the auth
+    // token — so the verbatim URI wins.
+    if let Some(uri) = params.connection_uri.as_deref() {
+        let uri = uri.trim();
+        if !uri.is_empty() {
+            if is_url(uri) {
+                let (url, token_from_url) = normalize_remote_url(uri);
+                let token = token_from_url.or_else(|| params.password.clone());
+                return Ok(Backend::Remote { url, token });
+            }
+            return Ok(Backend::Local(expand_path(uri)));
+        }
+    }
+
     let database = params.database.clone().unwrap_or_default();
     let database = database.trim();
 
@@ -261,7 +288,7 @@ fn build_url_from_host(host: &str, port: Option<u16>, ssl_mode: Option<&str>) ->
 }
 
 fn expand_path(path: &str) -> String {
-    let path = path.strip_prefix("file:").unwrap_or(path);
+    let path = strip_file_scheme(path);
     if path == ":memory:" {
         return path.to_string();
     }
@@ -271,6 +298,25 @@ fn expand_path(path: &str) -> String {
         }
     }
     path.to_string()
+}
+
+/// `file:` is a URI scheme, not part of the path. On Windows `file:///C:/x`
+/// must lose its slashes to become a drive path, but on Unix `file:///data/x`
+/// must keep them: the third slash is the root of the absolute path, and
+/// stripping it would silently open a relative `data/x` instead.
+fn strip_file_scheme(path: &str) -> &str {
+    strip_file_scheme_for(path, cfg!(windows))
+}
+
+fn strip_file_scheme_for(path: &str, windows: bool) -> &str {
+    if windows {
+        path.strip_prefix("file:///")
+            .or_else(|| path.strip_prefix("file://"))
+            .or_else(|| path.strip_prefix("file:"))
+            .unwrap_or(path)
+    } else {
+        path.strip_prefix("file:").unwrap_or(path)
+    }
 }
 
 #[cfg(test)]
@@ -316,6 +362,129 @@ mod tests {
         let (url, token) = normalize_remote_url("libsql://db.turso.io?authToken=abc123");
         assert_eq!(url, "https://db.turso.io");
         assert_eq!(token.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn connection_uri_beats_host_and_keeps_the_token() {
+        // The host parser fills `host` from the same URI; without the
+        // `connection_uri` step the query string (and token) would be lost.
+        let p = ConnectionParams {
+            host: Some("db.turso.io".into()),
+            database: None,
+            connection_uri: Some("libsql://db.turso.io?authToken=abc123".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_backend(&p).unwrap(),
+            Backend::Remote {
+                url: "https://db.turso.io".into(),
+                token: Some("abc123".into())
+            }
+        );
+    }
+
+    #[test]
+    fn connection_uri_token_wins_over_password() {
+        let p = ConnectionParams {
+            host: Some("db.turso.io".into()),
+            password: Some("pw".into()),
+            connection_uri: Some("libsql://db.turso.io?authToken=abc123".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_backend(&p).unwrap(),
+            Backend::Remote {
+                url: "https://db.turso.io".into(),
+                token: Some("abc123".into())
+            }
+        );
+    }
+
+    #[test]
+    fn connection_uri_falls_back_to_password_without_token() {
+        let p = ConnectionParams {
+            host: Some("db.turso.io".into()),
+            password: Some("pw".into()),
+            connection_uri: Some("libsql://db.turso.io".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_backend(&p).unwrap(),
+            Backend::Remote {
+                url: "https://db.turso.io".into(),
+                token: Some("pw".into())
+            }
+        );
+    }
+
+    #[test]
+    fn connection_uri_local_path_is_a_local_backend() {
+        let p = ConnectionParams {
+            host: Some("db.turso.io".into()),
+            connection_uri: Some("/data/app.db".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_backend(&p).unwrap(),
+            Backend::Local("/data/app.db".into())
+        );
+    }
+
+    #[test]
+    fn file_scheme_stripping_is_platform_aware() {
+        // Windows drive URIs drop the whole `file:///` prefix...
+        assert_eq!(
+            strip_file_scheme_for("file:///C:/data/app.db", true),
+            "C:/data/app.db"
+        );
+        assert_eq!(
+            strip_file_scheme_for("file://C:/data/app.db", true),
+            "C:/data/app.db"
+        );
+        assert_eq!(
+            strip_file_scheme_for("file:C:/data/app.db", true),
+            "C:/data/app.db"
+        );
+        // ...but on Unix only the scheme is a prefix; the slashes are the
+        // root of the absolute path and must survive.
+        assert_eq!(
+            strip_file_scheme_for("file:///data/app.db", false),
+            "///data/app.db"
+        );
+        assert_eq!(
+            strip_file_scheme_for("file:/data/app.db", false),
+            "/data/app.db"
+        );
+        assert_eq!(strip_file_scheme_for("/data/app.db", false), "/data/app.db");
+        assert_eq!(strip_file_scheme_for("data/app.db", true), "data/app.db");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn connection_uri_file_scheme_is_a_local_backend() {
+        let p = ConnectionParams {
+            connection_uri: Some("file:///C:/data/app.db".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_backend(&p).unwrap(),
+            Backend::Local("C:/data/app.db".into())
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn connection_uri_file_scheme_keeps_absolute_unix_path() {
+        // The manifest example form: file:///data/app.db must resolve to the
+        // absolute /data/app.db, never the relative data/app.db.
+        let p = ConnectionParams {
+            connection_uri: Some("file:///data/app.db".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_backend(&p).unwrap(),
+            Backend::Local("///data/app.db".into())
+        );
     }
 
     #[test]

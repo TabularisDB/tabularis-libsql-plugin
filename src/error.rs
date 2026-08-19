@@ -45,8 +45,8 @@ impl fmt::Display for PluginError {
 
 impl std::error::Error for PluginError {}
 
-impl From<rusqlite::Error> for PluginError {
-    fn from(err: rusqlite::Error) -> Self {
+impl From<libsql::Error> for PluginError {
+    fn from(err: libsql::Error) -> Self {
         PluginError::internal(format!("sqlite error: {err}"))
     }
 }

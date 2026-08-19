@@ -50,11 +50,38 @@ libsql://my-db.turso.io?authToken=eyJ...
 | Insert / update / delete rows (bound parameters) | ✅ |
 | Schema snapshot + batch columns/FKs (ER diagram) | ✅ |
 | `CREATE TABLE` SQL, add column, create/drop index | ✅ |
-| Schemas, stored routines | ❌ (not a SQLite concept) |
-| Alter column type, add/drop foreign key on existing table | ❌ (SQLite limitation — returns a clear error) |
+| Schemas, stored routines | ❌ (not a SQLite concept — Turso has no stored procedures, and its multi-database model is separate databases, not schemas) |
+| Rename column | ✅ everywhere (vanilla `RENAME COLUMN`) |
+| Alter column type / default | ✅ everywhere (libSQL `ALTER COLUMN` extension) |
+| Drop foreign key on existing table | ✅ everywhere |
+| Add foreign key to existing table | ✅ everywhere (see below) |
 
 Identifiers are quoted ANSI-style (`"name"`). Booleans are stored as `0`/`1` and
 BLOBs are returned base64-encoded.
+
+### Schema changes via ALTER COLUMN
+
+Both local files and remote Turso / sqld servers run the **libSQL fork** of
+SQLite, which adds
+`ALTER TABLE ... ALTER COLUMN col TO col <type> [DEFAULT ...] [REFERENCES ...]`.
+The plugin uses it to:
+
+- change a column's type (and optionally its DEFAULT / NOT NULL),
+- add or drop a foreign key on an existing column (the same statement with or
+  without the `REFERENCES` clause).
+
+The `get_create_foreign_key_sql` builder always receives connection params from
+the host, and `get_alter_column_sql` does too when the host provides them, so
+the plugin introspects the column's declared type and constraints (NOT NULL,
+DEFAULT, REFERENCES) and reproduces them in the rewrite — altering a column
+does not silently strip its foreign key or default. Note that libSQL applies
+constraint changes to newly inserted/updated rows only — existing rows are not
+rewritten or revalidated — and foreign key *enforcement* requires
+`PRAGMA foreign_keys=ON`.
+
+Composite (multi-column) foreign keys cannot be dropped: the fork only rewrites
+per-column definitions, so `drop_foreign_key` reports a clear error instead of
+silently doing nothing.
 
 ## Build & test
 
@@ -86,7 +113,8 @@ echo '{"jsonrpc":"2.0","method":"get_tables","params":{"params":{"database":"/tm
 ## Installing
 
 `just dev-install` copies `libsql-plugin` and `.tabularium` into the Tabularis
-plugins folder:
+plugins folder (the location Tabularis actually scans — derived from
+`ProjectDirs::from("com", "debba", "tabularis")`):
 
 - **Linux:** `~/.local/share/tabularis/plugins/libsql/`
 - **macOS:** `~/Library/Application Support/tabularis/plugins/libsql/`
@@ -109,8 +137,8 @@ src/
 └── utils/               # identifiers, pagination, SQL classification, value conversion
 ```
 
-Local files use [`rusqlite`](https://crates.io/crates/rusqlite) with the bundled
-SQLite. Remote connections use a small synchronous [`ureq`](https://crates.io/crates/ureq)
+Local files use the embedded **libSQL fork of SQLite** (bundled — nothing to
+install). Remote connections use a small synchronous [`ureq`](https://crates.io/crates/ureq)
 client (pure-Rust rustls TLS) speaking the stateless Hrana `/v2/pipeline`
 endpoint, so the same `query`/`execute` surface serves both backends with no
 async runtime.

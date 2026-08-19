@@ -47,12 +47,7 @@ dev-install: build
 
 [windows]
 dev-install: build
-    $dest = Join-Path $env:APPDATA "tabularis\plugins\libsql"
-    New-Item -ItemType Directory -Force -Path $dest | Out-Null
-    Copy-Item "target\debug\libsql-plugin.exe" $dest
-    Copy-Item ".tabularium" $dest
-    Write-Host "Installed to $dest"
-    Write-Host "Restart Tabularis (or toggle the plugin in Settings) to pick up changes."
+    $dest = Join-Path $env:APPDATA "tabularis\plugins\libsql"; New-Item -ItemType Directory -Force -Path $dest | Out-Null; Copy-Item "target\debug\libsql-plugin.exe" $dest; Copy-Item ".tabularium" $dest; Write-Host "Installed to $dest"; Write-Host "Restart Tabularis (or toggle the plugin in Settings) to pick up changes."
 
 [linux]
 uninstall:

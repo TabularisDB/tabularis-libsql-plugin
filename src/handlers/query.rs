@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use serde_json::{json, Value};
 
-use crate::client::{Client, QueryResult};
+use crate::client::QueryResult;
 use crate::error::PluginError;
 use crate::handlers::{connect, req_str, respond};
 use crate::utils::pagination::offset_for;
@@ -37,27 +37,46 @@ pub fn execute_query(id: Value, params: &Value) -> Value {
 fn execute_query_impl(params: &Value) -> Result<Value, PluginError> {
     let client = connect(params)?;
     let query = req_str(params, "query")?;
-    let page = params.get("page").and_then(Value::as_u64);
-    let page_size = params.get("page_size").and_then(Value::as_u64);
+    let page = params.get("page").and_then(Value::as_u64).unwrap_or(1);
+    let limit = params
+        .get("limit")
+        .or_else(|| params.get("page_size"))
+        .and_then(Value::as_u64)
+        .filter(|l| *l > 0);
 
     let started = Instant::now();
     let trimmed = strip_trailing_semicolons(&query);
 
     if returns_rows(&query) {
-        match (page_size, is_wrappable(&query)) {
-            (Some(size), true) if size > 0 => {
-                let offset = offset_for(page.unwrap_or(1), size);
-                let paged =
-                    format!("SELECT * FROM ({trimmed}) AS _tab_page LIMIT {size} OFFSET {offset}");
-                let result = client.query(&paged, &[])?;
-                let total = count_rows(&client, trimmed).unwrap_or(result.rows.len() as u64);
-                Ok(build_payload(result, total, started))
+        if let Some(size) = limit.filter(|_| is_wrappable(&query)) {
+            // Fetch one row past the page: the host contract derives `has_more`
+            // from the extra row (mirrors the built-in drivers' LIMIT +1 trick).
+            let offset = offset_for(page, size);
+            let paged = format!(
+                "SELECT * FROM ({trimmed}) AS _tab_page LIMIT {} OFFSET {offset}",
+                size + 1
+            );
+            let mut result = client.query(&paged, &[])?;
+            let has_more = result.rows.len() > size as usize;
+            if has_more {
+                result.rows.truncate(size as usize);
             }
-            _ => {
-                let result = client.query(trimmed, &[])?;
-                let total = result.rows.len() as u64;
-                Ok(build_payload(result, total, started))
-            }
+            let pagination = json!({
+                "page": page,
+                "page_size": size,
+                "total_rows": Value::Null,
+                "has_more": has_more,
+            });
+            Ok(build_payload(
+                result,
+                0,
+                has_more,
+                started,
+                Some(pagination),
+            ))
+        } else {
+            let result = client.query(trimmed, &[])?;
+            Ok(build_payload(result, 0, false, started, None))
         }
     } else {
         // DML/DDL: no result set, report the affected-row count.
@@ -65,7 +84,9 @@ fn execute_query_impl(params: &Value) -> Result<Value, PluginError> {
         Ok(json!({
             "columns": [],
             "rows": [],
-            "total_count": affected,
+            "affected_rows": affected,
+            "truncated": false,
+            "pagination": Value::Null,
             "execution_time_ms": started.elapsed().as_millis() as u64,
         }))
     }
@@ -78,27 +99,26 @@ pub fn explain_query(id: Value, params: &Value) -> Value {
             let started = Instant::now();
             let sql = format!("EXPLAIN QUERY PLAN {}", strip_trailing_semicolons(&query));
             let result = client.query(&sql, &[])?;
-            let total = result.rows.len() as u64;
-            Ok(build_payload(result, total, started))
+            Ok(build_payload(result, 0, false, started, None))
         })
     })
 }
 
-fn count_rows(client: &Client, inner_sql: &str) -> Option<u64> {
-    let sql = format!("SELECT COUNT(*) FROM ({inner_sql}) AS _tab_count");
-    let result = client.query(&sql, &[]).ok()?;
-    result
-        .rows
-        .first()
-        .and_then(|row| row.first())
-        .and_then(Value::as_u64)
-}
-
-fn build_payload(result: QueryResult, total_count: u64, started: Instant) -> Value {
+/// Serialise a result set into the host's `QueryResult` contract
+/// (`affected_rows`/`truncated`/`pagination` are required fields).
+fn build_payload(
+    result: QueryResult,
+    affected_rows: u64,
+    truncated: bool,
+    started: Instant,
+    pagination: Option<Value>,
+) -> Value {
     json!({
         "columns": result.columns,
         "rows": result.rows,
-        "total_count": total_count,
+        "affected_rows": affected_rows,
+        "truncated": truncated,
+        "pagination": pagination,
         "execution_time_ms": started.elapsed().as_millis() as u64,
     })
 }
