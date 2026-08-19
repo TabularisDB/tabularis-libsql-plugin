@@ -98,15 +98,20 @@ fn local_query(
         .collect();
     let ncol = columns.len();
 
-    let mut out_rows = Vec::new();
-    while let Some(row) = futures_executor::block_on(rows.next())? {
-        let mut cells = Vec::with_capacity(ncol);
-        for i in 0..ncol {
-            let value = row.get_value(i as i32)?;
-            cells.push(libsql_value_to_json(value));
+    // One executor for the whole fetch loop: block_on per row would tear down
+    // and rebuild the waker/parker machinery for every row on the hot path.
+    let out_rows = futures_executor::block_on(async {
+        let mut out_rows = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let mut cells = Vec::with_capacity(ncol);
+            for i in 0..ncol {
+                let value = row.get_value(i as i32)?;
+                cells.push(libsql_value_to_json(value));
+            }
+            out_rows.push(cells);
         }
-        out_rows.push(cells);
-    }
+        Ok::<_, PluginError>(out_rows)
+    })?;
 
     Ok(QueryResult {
         columns,
