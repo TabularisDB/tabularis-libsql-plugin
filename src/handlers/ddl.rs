@@ -28,7 +28,7 @@ use serde_json::{json, Value};
 
 use crate::client::Client;
 use crate::error::PluginError;
-use crate::handlers::{cell_i64, cell_str, connect, req_str, respond};
+use crate::handlers::{cell_i64, cell_str, connect, fk_name, req_str, respond};
 use crate::utils::identifiers::quote;
 
 // ---------------------------------------------------------------------------
@@ -581,7 +581,7 @@ fn build_fk_drop_sql(table: &str, column: &str, def: &ColumnDef) -> String {
 /// Composite (table-level) foreign keys appear as several
 /// `PRAGMA foreign_key_list` rows sharing one id — one per column. The fork's
 /// ALTER COLUMN rewrite is per-column and cannot remove them.
-fn is_composite_fk(client: &Client, table: &str, fk_name: &str) -> Result<bool, PluginError> {
+fn is_composite_fk(client: &Client, table: &str, name: &str) -> Result<bool, PluginError> {
     let r = client.query(&format!("PRAGMA foreign_key_list({})", quote(table)), &[])?;
     // Each row of a composite FK carries the same id but a different column
     // name, so the host-side name only matches one row; count the rows that
@@ -590,7 +590,7 @@ fn is_composite_fk(client: &Client, table: &str, fk_name: &str) -> Result<bool, 
     for row in &r.rows {
         let id = cell_i64(row, 0);
         let from = cell_str(row, 3).unwrap_or_default();
-        if format!("fk_{table}_{from}_{id}") == fk_name {
+        if fk_name(table, &from, id) == name {
             target = Some(id);
             break;
         }
@@ -668,22 +668,18 @@ fn cell_raw(row: &[Value], i: usize) -> Option<String> {
 /// to the SQLite column it constrains. SQLite FKs carry no names of their own,
 /// so the mapping re-derives the same naming scheme from
 /// `PRAGMA foreign_key_list`.
-fn foreign_key_column_for(
-    client: &Client,
-    table: &str,
-    fk_name: &str,
-) -> Result<String, PluginError> {
+fn foreign_key_column_for(client: &Client, table: &str, name: &str) -> Result<String, PluginError> {
     let r = client.query(&format!("PRAGMA foreign_key_list({})", quote(table)), &[])?;
     for row in &r.rows {
         // foreign_key_list columns: id, seq, table, from, to, on_update, on_delete, match
         let id = cell_i64(row, 0);
         let from = cell_str(row, 3).unwrap_or_default();
-        if format!("fk_{table}_{from}_{id}") == fk_name {
+        if fk_name(table, &from, id) == name {
             return Ok(from);
         }
     }
     Err(PluginError::invalid_params(format!(
-        "foreign key '{fk_name}' not found on table '{table}'"
+        "foreign key '{name}' not found on table '{table}'"
     )))
 }
 

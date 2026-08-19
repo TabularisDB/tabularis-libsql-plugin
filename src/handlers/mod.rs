@@ -26,6 +26,14 @@ pub fn respond(id: Value, result: Result<Value, PluginError>) -> Value {
     }
 }
 
+/// The host-facing foreign-key name, derived from table, local column and
+/// constraint id. `metadata::foreign_keys_for` generates it and
+/// `ddl::drop_foreign_key` reverse-maps it; keep both sides on one helper so
+/// they can never drift apart.
+pub fn fk_name(table: &str, column: &str, id: i64) -> String {
+    format!("fk_{table}_{column}_{id}")
+}
+
 /// Read a required string parameter from the top-level params object.
 pub fn req_str(params: &Value, key: &str) -> Result<String, PluginError> {
     params

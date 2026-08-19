@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 
 use crate::client::Client;
 use crate::error::PluginError;
-use crate::handlers::{cell, cell_i64, cell_str, connect, req_str, respond};
+use crate::handlers::{cell, cell_i64, cell_str, connect, fk_name, req_str, respond};
 use crate::utils::identifiers::quote;
 
 // ---------------------------------------------------------------------------
@@ -60,7 +60,7 @@ fn foreign_keys_for(client: &Client, table: &str) -> Result<Vec<Value>, PluginEr
         let from = cell_str(row, 3).unwrap_or_default();
         let to = cell_str(row, 4).unwrap_or_default();
         fks.push(json!({
-            "name": format!("fk_{table}_{from}_{id}"),
+            "name": fk_name(table, &from, id),
             "column_name": from,
             "ref_table": ref_table,
             "ref_column": to,
