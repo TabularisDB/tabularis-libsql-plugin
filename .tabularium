@@ -1,6 +1,6 @@
 {
   "name": "libsql",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "kind": "driver",
   "description": "libSQL / Turso driver. Connects to local libSQL/SQLite files (embedded libSQL fork: ALTER COLUMN and foreign-key add/drop work locally) and to remote Turso or sqld servers over the Hrana HTTP protocol.",
   "engine": "libsql",

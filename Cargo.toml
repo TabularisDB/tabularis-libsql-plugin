@@ -1,6 +1,6 @@
 [package]
 name = "libsql-plugin"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Tabularis driver plugin for libSQL / Turso (local files and remote Hrana-over-HTTP)"
 license = "Apache-2.0"
