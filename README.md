@@ -23,19 +23,27 @@ The driver picks a backend from the connection form automatically:
 | You enter | Backend |
 |-----------|---------|
 | A file path in **Database** (e.g. `/data/app.db`, `~/notes.db`, `:memory:`) | Local SQLite file |
-| A URL in **Database** or **Host** (e.g. `libsql://my-db.turso.io`) | Remote Hrana HTTP |
+| A URL in **Database** or **Host** (e.g. `libsql://my-db.turso.io`, `http://localhost:8080/dev/example/`) | Remote Hrana HTTP |
 | A bare host in **Host** (e.g. `db.turso.io`) | Remote Hrana HTTP (`https://`) |
 
 For Turso, put the **auth token** in the **Password** field, or append it to the
 URL as `?authToken=...`. `libsql://`, `wss://` and `turso://` URLs are
 automatically rewritten to `https://` (and `ws://` to `http://`) for the Hrana
-HTTP endpoint. A self-hosted sqld on `localhost:8080` uses `http://`
-automatically.
+HTTP endpoint. `http://` and `https://` URLs are used as-is. A bare
+`localhost:8080` host uses `http://` automatically.
+
+Self-hosted sqld namespaces: the namespace is derived from the URL path
+(`http://localhost:8080/dev/example/` → `example`) and sent as the `x-namespace`
+header, because sqld 0.24.x ignores the path and would otherwise resolve the
+namespace from the Host header. This also covers decomposed `host`/`port`/
+`database` params — a multi-segment database value (`dev/example`) is kept as a
+path prefix. Turso database names contain no `/`, so plain names stay pathless.
 
 Connection-string import is supported, e.g.:
 
 ```
 libsql://my-db.turso.io?authToken=eyJ...
+http://localhost:8080/dev/example/
 ```
 
 ## Feature coverage

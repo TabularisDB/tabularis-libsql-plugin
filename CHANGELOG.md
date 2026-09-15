@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-09-15
+
+### Fixed
+
+- `http://` / `https://` connection strings were rejected as an unsupported
+  driver before the plugin ever saw them: `.tabularium` declared only `turso` /
+  `wss` / `ws` / `file` in `connection_uri_schemes`. Both schemes are declared
+  now, so the URI arrives verbatim instead of being rejected up front.
+- Decomposed connection params dropped the server path: given a bare `host`
+  plus `database` (e.g. `dev/example`), the plugin built `http://host:8080` and
+  posted to `/v2/pipeline`, so sqld resolved the namespace from the Host header
+  (the first octet of an IP literal) and returned `404 Namespace ... doesn't exist`. A
+  multi-segment database value is now kept as a path prefix; Turso database
+  names cannot contain a separator, so plain names are unaffected.
+- Path-based namespaces never selected the right database on sqld: the server
+  resolves the namespace from the `x-namespace` header — the URL path is
+  ignored by 0.24.x, which falls back to the Host header (`31` for
+  `192.0.2.10`) — so `http://host:8080/dev/example/` returned
+  `404 Namespace ... doesn't exist`. The plugin now derives the namespace
+  from the URL path (`dev/example` → `example`) and sends it as `x-namespace`;
+  plain Turso hosts, which select their database through the hostname, send
+  no header.
+
 ## [1.0.0] - 2026-08-25
 
 First stable release. Local libSQL / SQLite files via the embedded libSQL fork
@@ -88,5 +111,6 @@ Thanks to @debba, @NewtTheWolf and @jonaspm — see the
 [v1.0.0 release notes](https://github.com/TabularisDB/tabularis-libsql-plugin/releases/tag/v1.0.0)
 for the full list.
 
-[Unreleased]: https://github.com/TabularisDB/tabularis-libsql-plugin/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/TabularisDB/tabularis-libsql-plugin/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/TabularisDB/tabularis-libsql-plugin/releases/tag/v1.0.1
 [1.0.0]: https://github.com/TabularisDB/tabularis-libsql-plugin/releases/tag/v1.0.0
