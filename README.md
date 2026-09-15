@@ -32,7 +32,10 @@ automatically rewritten to `https://` (and `ws://` to `http://`) for the Hrana
 HTTP endpoint. `http://` and `https://` URLs are used as-is, path included — so
 a self-hosted sqld namespace such as `http://localhost:8080/dev/example/` reaches
 `http://localhost:8080/dev/example/v2/pipeline`. A bare `localhost:8080` host
-uses `http://` automatically.
+uses `http://` automatically. When the host sends decomposed `host`/`port`/
+`database` params instead of the verbatim URI, a multi-segment database value
+(`dev/example`) is kept as a path prefix — Turso database names contain no `/`,
+so plain names stay pathless.
 
 Connection-string import is supported, e.g.:
 

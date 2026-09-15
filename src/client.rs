@@ -207,6 +207,10 @@ pub fn resolve_backend(params: &ConnectionParams) -> Result<Backend, PluginError
                 return Ok(Backend::Remote { url, token });
             }
             let url = build_url_from_host(host, params.port, params.ssl_mode.as_deref());
+            let url = match database_path_prefix(database) {
+                Some(path) => format!("{url}/{path}"),
+                None => url,
+            };
             return Ok(Backend::Remote {
                 url,
                 token: params.password.clone(),
@@ -285,6 +289,16 @@ fn build_url_from_host(host: &str, port: Option<u16>, ssl_mode: Option<&str>) ->
         Some(p) => format!("{scheme}://{host}:{p}"),
         None => format!("{scheme}://{host}"),
     }
+}
+
+/// The `database` field is a bare name for Turso (the database lives in the
+/// hostname) but a path prefix for a self-hosted server — the host decomposes
+/// `http://host:8080/dev/example/` into database `dev/example`. A path separator
+/// is the tell: Turso database names cannot contain one, so a plain name like
+/// `main` is never mistaken for a path.
+fn database_path_prefix(database: &str) -> Option<&str> {
+    let path = database.trim_matches('/');
+    path.contains('/').then_some(path)
 }
 
 fn expand_path(path: &str) -> String {
@@ -538,6 +552,60 @@ mod tests {
             resolve_backend(&p).unwrap(),
             Backend::Remote {
                 url: "https://db.turso.io".into(),
+                token: Some("tok".into())
+            }
+        );
+    }
+
+    #[test]
+    fn bare_host_with_database_path_keeps_namespaced_url() {
+        // The host decomposes `http://192.0.2.10:8080/dev/example/` into
+        // host/port/database; the database path must survive, because sqld
+        // picks the namespace from it (`/dev/:namespace/v2/pipeline`), not
+        // from the Host header (which would read `31`).
+        let p = ConnectionParams {
+            host: Some("192.0.2.10".into()),
+            port: Some(8080),
+            database: Some("dev/example".into()),
+            ssl_mode: Some("disable".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_backend(&p).unwrap(),
+            Backend::Remote {
+                url: "http://192.0.2.10:8080/dev/example".into(),
+                token: None
+            }
+        );
+    }
+
+    #[test]
+    fn bare_host_database_path_trims_trailing_slash() {
+        let p = ConnectionParams {
+            host: Some("192.0.2.10".into()),
+            port: Some(8080),
+            database: Some("dev/example/".into()),
+            ssl_mode: Some("disable".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_backend(&p).unwrap(),
+            Backend::Remote {
+                url: "http://192.0.2.10:8080/dev/example".into(),
+                token: None
+            }
+        );
+    }
+
+    #[test]
+    fn bare_host_with_plain_database_name_gains_no_path() {
+        // Turso database names cannot contain a slash — the name lives in the
+        // hostname, so a bare name must not become a URL path.
+        let p = params(Some("my-db"), Some("my-db.turso.io"), Some("tok"));
+        assert_eq!(
+            resolve_backend(&p).unwrap(),
+            Backend::Remote {
+                url: "https://my-db.turso.io".into(),
                 token: Some("tok".into())
             }
         );

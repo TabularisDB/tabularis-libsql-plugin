@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now, so the URI arrives verbatim and its path is preserved — a local sqld
   namespace such as `http://localhost:8080/dev/example/` posts to
   `http://localhost:8080/dev/example/v2/pipeline`.
+- Decomposed connection params dropped the server path: given a bare `host`
+  plus `database` (e.g. `dev/example`), the plugin built `http://host:8080` and
+  posted to `/v2/pipeline`, so sqld resolved the namespace from the Host header
+  (the first octet of an IP literal) and returned `404 Namespace ... doesn't exist`. A
+  multi-segment database value is now kept as a path prefix; Turso database
+  names cannot contain a separator, so plain names are unaffected.
 
 ## [1.0.0] - 2026-08-25
 
