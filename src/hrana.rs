@@ -24,13 +24,18 @@ pub struct HranaClient {
     /// Base URL without a trailing slash, already normalised to http(s).
     base_url: String,
     auth_token: Option<String>,
+    /// Namespace selected from the URL path, sent as `x-namespace`.
+    namespace: Option<String>,
 }
 
 impl HranaClient {
     pub fn new(base_url: String, auth_token: Option<String>) -> Self {
+        let base_url = base_url.trim_end_matches('/').to_string();
+        let namespace = namespace_from_url_path(&base_url);
         Self {
-            base_url: base_url.trim_end_matches('/').to_string(),
+            base_url,
             auth_token,
+            namespace,
         }
     }
 
@@ -51,6 +56,9 @@ impl HranaClient {
         if let Some(token) = &self.auth_token {
             req = req.set("Authorization", &format!("Bearer {token}"));
         }
+        if let Some(namespace) = &self.namespace {
+            req = req.set("x-namespace", namespace);
+        }
 
         let response = req.send_json(body).map_err(map_ureq_err)?;
         let value: Value = response.into_json().map_err(|e| {
@@ -59,6 +67,26 @@ impl HranaClient {
 
         parse_pipeline(&value)
     }
+}
+
+/// sqld picks the namespace from the `x-namespace` header, not from the URL
+/// path: 0.24.x serves `/dev/:namespace/v2/pipeline` but resolves the
+/// namespace from the Host header anyway, which yields `31` for an IP and a
+/// `Namespace '31' doesn't exist` 404. The path carries the name, so derive it
+/// (`http://host:8080/dev/example/` → `example`) and send the header. Only
+/// path-shaped URLs get a namespace — a plain Turso host (`my-db.turso.io`)
+/// selects its database through the hostname and must stay untouched.
+fn namespace_from_url_path(url: &str) -> Option<String> {
+    let (_, after_scheme) = url.split_once("://")?;
+    let (_, path) = after_scheme.split_once('/')?;
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let name = match segments.as_slice() {
+        [name] => name,
+        // `turso dev` prefixes its namespaced route with a literal `dev`.
+        ["dev", name] => name,
+        _ => return None,
+    };
+    Some((*name).to_string())
 }
 
 fn map_ureq_err(err: ureq::Error) -> PluginError {
@@ -141,6 +169,33 @@ fn parse_pipeline(value: &Value) -> Result<HranaResult, PluginError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn namespace_derives_from_dev_route_and_single_segment_paths() {
+        assert_eq!(
+            namespace_from_url_path("http://192.0.2.10:8080/dev/example").as_deref(),
+            Some("example")
+        );
+        assert_eq!(
+            namespace_from_url_path("http://192.0.2.10:8080/example").as_deref(),
+            Some("example")
+        );
+    }
+
+    #[test]
+    fn namespace_absent_for_plain_hosts_and_ambiguous_paths() {
+        // Turso selects its database through the hostname; no header wanted.
+        assert_eq!(namespace_from_url_path("https://my-db.turso.io"), None);
+        assert_eq!(
+            namespace_from_url_path("http://localhost:8080").as_deref(),
+            None
+        );
+        // A namespace is a single token, so anything else is not a base URL.
+        assert_eq!(
+            namespace_from_url_path("http://host:8080/dev/example/v2/pipeline"),
+            None
+        );
+    }
 
     #[test]
     fn parses_a_successful_execute() {

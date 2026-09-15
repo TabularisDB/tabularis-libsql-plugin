@@ -35,7 +35,10 @@ a self-hosted sqld namespace such as `http://localhost:8080/dev/example/` reache
 uses `http://` automatically. When the host sends decomposed `host`/`port`/
 `database` params instead of the verbatim URI, a multi-segment database value
 (`dev/example`) is kept as a path prefix — Turso database names contain no `/`,
-so plain names stay pathless.
+so plain names stay pathless. Self-hosted sqld namespaces are selected with the
+`x-namespace` header derived from the URL path (`dev/example` → `example`),
+because sqld 0.24.x ignores the path and otherwise resolves the namespace from
+the Host header.
 
 Connection-string import is supported, e.g.:
 

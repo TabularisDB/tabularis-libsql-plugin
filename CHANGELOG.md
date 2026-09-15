@@ -23,6 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (the first octet of an IP literal) and returned `404 Namespace ... doesn't exist`. A
   multi-segment database value is now kept as a path prefix; Turso database
   names cannot contain a separator, so plain names are unaffected.
+- Path-based namespaces never selected the right database on sqld: the server
+  resolves the namespace from the `x-namespace` header — the URL path is
+  ignored by 0.24.x, which falls back to the Host header (`31` for
+  `192.0.2.10`) — so `http://host:8080/dev/example/` returned
+  `404 Namespace ... doesn't exist`. The plugin now derives the namespace
+  from the URL path (`dev/example` → `example`) and sends it as `x-namespace`;
+  plain Turso hosts, which select their database through the hostname, send
+  no header.
 
 ## [1.0.0] - 2026-08-25
 
