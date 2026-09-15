@@ -29,16 +29,15 @@ The driver picks a backend from the connection form automatically:
 For Turso, put the **auth token** in the **Password** field, or append it to the
 URL as `?authToken=...`. `libsql://`, `wss://` and `turso://` URLs are
 automatically rewritten to `https://` (and `ws://` to `http://`) for the Hrana
-HTTP endpoint. `http://` and `https://` URLs are used as-is, path included — so
-a self-hosted sqld namespace such as `http://localhost:8080/dev/example/` reaches
-`http://localhost:8080/dev/example/v2/pipeline`. A bare `localhost:8080` host
-uses `http://` automatically. When the host sends decomposed `host`/`port`/
-`database` params instead of the verbatim URI, a multi-segment database value
-(`dev/example`) is kept as a path prefix — Turso database names contain no `/`,
-so plain names stay pathless. Self-hosted sqld namespaces are selected with the
-`x-namespace` header derived from the URL path (`dev/example` → `example`),
-because sqld 0.24.x ignores the path and otherwise resolves the namespace from
-the Host header.
+HTTP endpoint. `http://` and `https://` URLs are used as-is. A bare
+`localhost:8080` host uses `http://` automatically.
+
+Self-hosted sqld namespaces: the namespace is derived from the URL path
+(`http://localhost:8080/dev/example/` → `example`) and sent as the `x-namespace`
+header, because sqld 0.24.x ignores the path and would otherwise resolve the
+namespace from the Host header. This also covers decomposed `host`/`port`/
+`database` params — a multi-segment database value (`dev/example`) is kept as a
+path prefix. Turso database names contain no `/`, so plain names stay pathless.
 
 Connection-string import is supported, e.g.:
 

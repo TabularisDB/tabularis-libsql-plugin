@@ -14,9 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `http://` / `https://` connection strings were rejected as an unsupported
   driver before the plugin ever saw them: `.tabularium` declared only `turso` /
   `wss` / `ws` / `file` in `connection_uri_schemes`. Both schemes are declared
-  now, so the URI arrives verbatim and its path is preserved — a local sqld
-  namespace such as `http://localhost:8080/dev/example/` posts to
-  `http://localhost:8080/dev/example/v2/pipeline`.
+  now, so the URI arrives verbatim instead of being rejected up front.
 - Decomposed connection params dropped the server path: given a bare `host`
   plus `database` (e.g. `dev/example`), the plugin built `http://host:8080` and
   posted to `/v2/pipeline`, so sqld resolved the namespace from the Host header
