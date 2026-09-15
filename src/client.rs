@@ -500,6 +500,38 @@ mod tests {
     }
 
     #[test]
+    fn http_url_keeps_scheme_and_server_path() {
+        // A self-hosted sqld namespace lives in the URL path; dropping it
+        // would silently route every query to the wrong database.
+        let (url, token) = normalize_remote_url("http://localhost:8080/dev/example/");
+        assert_eq!(url, "http://localhost:8080/dev/example");
+        assert_eq!(token, None);
+    }
+
+    #[test]
+    fn http_connection_uri_resolves_to_namespaced_remote_url() {
+        let p = ConnectionParams {
+            connection_uri: Some("http://localhost:8080/dev/example/".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_backend(&p).unwrap(),
+            Backend::Remote {
+                url: "http://localhost:8080/dev/example".into(),
+                token: None
+            }
+        );
+    }
+
+    #[test]
+    fn https_url_with_token_is_remote() {
+        assert_eq!(
+            normalize_remote_url("https://db.turso.io?authToken=abc"),
+            ("https://db.turso.io".to_string(), Some("abc".to_string()))
+        );
+    }
+
+    #[test]
     fn host_field_builds_remote_url() {
         let p = params(None, Some("db.turso.io"), Some("tok"));
         assert_eq!(

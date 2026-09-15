@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-09-15
+
+### Fixed
+
+- `http://` / `https://` connection strings were rejected as an unsupported
+  driver before the plugin ever saw them: `.tabularium` declared only `turso` /
+  `wss` / `ws` / `file` in `connection_uri_schemes`. Both schemes are declared
+  now, so the URI arrives verbatim and its path is preserved — a local sqld
+  namespace such as `http://localhost:8080/dev/example/` posts to
+  `http://localhost:8080/dev/example/v2/pipeline`.
+
 ## [1.0.0] - 2026-08-25
 
 First stable release. Local libSQL / SQLite files via the embedded libSQL fork
@@ -88,5 +99,6 @@ Thanks to @debba, @NewtTheWolf and @jonaspm — see the
 [v1.0.0 release notes](https://github.com/TabularisDB/tabularis-libsql-plugin/releases/tag/v1.0.0)
 for the full list.
 
-[Unreleased]: https://github.com/TabularisDB/tabularis-libsql-plugin/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/TabularisDB/tabularis-libsql-plugin/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/TabularisDB/tabularis-libsql-plugin/releases/tag/v1.0.1
 [1.0.0]: https://github.com/TabularisDB/tabularis-libsql-plugin/releases/tag/v1.0.0

@@ -23,19 +23,22 @@ The driver picks a backend from the connection form automatically:
 | You enter | Backend |
 |-----------|---------|
 | A file path in **Database** (e.g. `/data/app.db`, `~/notes.db`, `:memory:`) | Local SQLite file |
-| A URL in **Database** or **Host** (e.g. `libsql://my-db.turso.io`) | Remote Hrana HTTP |
+| A URL in **Database** or **Host** (e.g. `libsql://my-db.turso.io`, `http://localhost:8080/dev/example/`) | Remote Hrana HTTP |
 | A bare host in **Host** (e.g. `db.turso.io`) | Remote Hrana HTTP (`https://`) |
 
 For Turso, put the **auth token** in the **Password** field, or append it to the
 URL as `?authToken=...`. `libsql://`, `wss://` and `turso://` URLs are
 automatically rewritten to `https://` (and `ws://` to `http://`) for the Hrana
-HTTP endpoint. A self-hosted sqld on `localhost:8080` uses `http://`
-automatically.
+HTTP endpoint. `http://` and `https://` URLs are used as-is, path included — so
+a self-hosted sqld namespace such as `http://localhost:8080/dev/example/` reaches
+`http://localhost:8080/dev/example/v2/pipeline`. A bare `localhost:8080` host
+uses `http://` automatically.
 
 Connection-string import is supported, e.g.:
 
 ```
 libsql://my-db.turso.io?authToken=eyJ...
+http://localhost:8080/dev/example/
 ```
 
 ## Feature coverage
