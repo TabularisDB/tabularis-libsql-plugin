@@ -319,23 +319,29 @@ pub fn get_schema_snapshot(id: Value, params: &Value) -> Value {
 
 fn get_schema_snapshot_impl(params: &Value) -> Result<Value, PluginError> {
     let client = connect(params)?;
-    let names = list_table_names(&client)?;
+    schema_snapshot_for(&client)
+}
 
-    let mut tables = Vec::with_capacity(names.len());
-    let mut columns = serde_json::Map::new();
-    let mut foreign_keys = serde_json::Map::new();
+/// One entry per table, shaped exactly like the host's `TableSchema`:
+/// `{ name, columns, foreign_keys }`.
+///
+/// The host deserializes this response straight into `Vec<TableSchema>`, so a
+/// `{tables, columns, foreign_keys}` envelope (or a per-table map keyed by
+/// name) fails that parse and the ER diagram shows a load error instead of the
+/// diagram. Keep the top-level value an array — an empty schema is `[]`.
+fn schema_snapshot_for(client: &Client) -> Result<Value, PluginError> {
+    let names = list_table_names(client)?;
 
+    let mut snapshot = Vec::with_capacity(names.len());
     for name in &names {
-        tables.push(json!({ "name": name, "schema": Value::Null, "comment": Value::Null }));
-        columns.insert(name.clone(), json!(columns_for(&client, name)?));
-        foreign_keys.insert(name.clone(), json!(foreign_keys_for(&client, name)?));
+        snapshot.push(json!({
+            "name": name,
+            "columns": columns_for(client, name)?,
+            "foreign_keys": foreign_keys_for(client, name)?,
+        }));
     }
 
-    Ok(json!({
-        "tables": tables,
-        "columns": Value::Object(columns),
-        "foreign_keys": Value::Object(foreign_keys),
-    }))
+    Ok(Value::Array(snapshot))
 }
 
 pub fn get_all_columns_batch(id: Value, params: &Value) -> Value {
@@ -438,6 +444,62 @@ mod tests {
         assert_eq!(fk["ref_column"], "id");
         assert_eq!(fk["on_delete"], "CASCADE");
         assert_eq!(fk["on_update"], "NO ACTION");
+    }
+
+    #[test]
+    fn schema_snapshot_matches_host_table_schema_array() {
+        // Regression: the ER diagram loads `get_schema_snapshot` straight into
+        // the host's `Vec<TableSchema>`. A `{tables, columns, foreign_keys}`
+        // envelope (the shape this handler used to return) makes that
+        // deserialization fail, so the diagram window only ever showed
+        // "Failed to load diagram: invalid type: map, expected a sequence".
+        let client = in_memory_client();
+        client
+            .execute(
+                "CREATE TABLE authors(id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+                &[],
+            )
+            .expect("create authors");
+        client
+            .execute(
+                "CREATE TABLE posts(id INTEGER PRIMARY KEY, author_id INTEGER REFERENCES authors(id))",
+                &[],
+            )
+            .expect("create posts");
+
+        let snapshot = schema_snapshot_for(&client).expect("schema snapshot");
+        let tables = snapshot
+            .as_array()
+            .expect("host deserializes the result as a JSON array of tables");
+        assert_eq!(tables.len(), 2);
+
+        for table in tables {
+            // TableSchema { name, columns, foreign_keys } — all required.
+            assert!(table["name"].is_string());
+            assert!(table["columns"].is_array());
+            assert!(table["foreign_keys"].is_array());
+        }
+
+        let posts = tables
+            .iter()
+            .find(|table| table["name"] == "posts")
+            .expect("posts entry");
+        let columns = posts["columns"].as_array().expect("posts columns");
+        assert!(columns.iter().any(|column| column["name"] == "author_id"));
+
+        let foreign_keys = posts["foreign_keys"].as_array().expect("posts fks");
+        assert_eq!(foreign_keys.len(), 1);
+        assert_eq!(foreign_keys[0]["column_name"], "author_id");
+        assert_eq!(foreign_keys[0]["ref_table"], "authors");
+        assert_eq!(foreign_keys[0]["ref_column"], "id");
+    }
+
+    #[test]
+    fn schema_snapshot_for_empty_schema_is_an_empty_array() {
+        let client = in_memory_client();
+
+        let snapshot = schema_snapshot_for(&client).expect("schema snapshot");
+        assert_eq!(snapshot, json!([]));
     }
 
     #[test]

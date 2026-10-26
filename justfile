@@ -31,33 +31,33 @@ fmt:
 
 [linux]
 dev-install: build
-    mkdir -p ~/.local/share/tabularis/plugins/libsql
-    cp target/debug/libsql-plugin ~/.local/share/tabularis/plugins/libsql/
-    cp .tabularium ~/.local/share/tabularis/plugins/libsql/
-    @echo "Installed to ~/.local/share/tabularis/plugins/libsql"
+    mkdir -p ~/.local/share/tabularis/plugins/drivers/libsql
+    cp target/debug/libsql-plugin ~/.local/share/tabularis/plugins/drivers/libsql/
+    cp .tabularium ~/.local/share/tabularis/plugins/drivers/libsql/
+    @echo "Installed to ~/.local/share/tabularis/plugins/drivers/libsql"
     @echo "Restart Tabularis (or toggle the plugin in Settings) to pick up changes."
 
 [macos]
 dev-install: build
-    mkdir -p "$HOME/Library/Application Support/tabularis/plugins/libsql"
-    cp target/debug/libsql-plugin "$HOME/Library/Application Support/tabularis/plugins/libsql/"
-    cp .tabularium "$HOME/Library/Application Support/tabularis/plugins/libsql/"
-    @echo "Installed to ~/Library/Application Support/tabularis/plugins/libsql"
+    mkdir -p "$HOME/Library/Application Support/tabularis/plugins/drivers/libsql"
+    cp target/debug/libsql-plugin "$HOME/Library/Application Support/tabularis/plugins/drivers/libsql/"
+    cp .tabularium "$HOME/Library/Application Support/tabularis/plugins/drivers/libsql/"
+    @echo "Installed to ~/Library/Application Support/tabularis/plugins/drivers/libsql"
     @echo "Restart Tabularis (or toggle the plugin in Settings) to pick up changes."
 
 [windows]
 dev-install: build
-    $dest = Join-Path $env:APPDATA "tabularis\plugins\libsql"; New-Item -ItemType Directory -Force -Path $dest | Out-Null; Copy-Item "target\debug\libsql-plugin.exe" $dest; Copy-Item ".tabularium" $dest; Write-Host "Installed to $dest"; Write-Host "Restart Tabularis (or toggle the plugin in Settings) to pick up changes."
+    $dest = Join-Path $env:APPDATA "tabularis\plugins\drivers\libsql"; New-Item -ItemType Directory -Force -Path $dest | Out-Null; Copy-Item "target\debug\libsql-plugin.exe" $dest; Copy-Item ".tabularium" $dest; Write-Host "Installed to $dest"; Write-Host "Restart Tabularis (or toggle the plugin in Settings) to pick up changes."
 
 [linux]
 uninstall:
-    rm -rf ~/.local/share/tabularis/plugins/libsql
+    rm -rf ~/.local/share/tabularis/plugins/drivers/libsql
 
 [macos]
 uninstall:
-    rm -rf "$HOME/Library/Application Support/tabularis/plugins/libsql"
+    rm -rf "$HOME/Library/Application Support/tabularis/plugins/drivers/libsql"
 
 [windows]
 uninstall:
-    $dest = Join-Path $env:APPDATA "tabularis\plugins\libsql"
+    $dest = Join-Path $env:APPDATA "tabularis\plugins\drivers\libsql"
     if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
