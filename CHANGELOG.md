@@ -132,7 +132,7 @@ Thanks to @debba, @NewtTheWolf and @jonaspm — see the
 for the full list.
 
 [Unreleased]: https://github.com/TabularisDB/tabularis-libsql-plugin/compare/v1.0.3...HEAD
-[1.0.3]: https://github.com/TabularisDB/tabularis-libsql-plugin/compare/v1.0.2...v1.0.3
+[1.0.3]: https://github.com/TabularisDB/tabularis-libsql-plugin/releases/tag/v1.0.3
 [1.0.2]: https://github.com/TabularisDB/tabularis-libsql-plugin/releases/tag/v1.0.2
 [1.0.1]: https://github.com/TabularisDB/tabularis-libsql-plugin/releases/tag/v1.0.1
 [1.0.0]: https://github.com/TabularisDB/tabularis-libsql-plugin/releases/tag/v1.0.0

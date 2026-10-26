@@ -1,5 +1,7 @@
 # Tabularis libSQL / Turso driver
 
+[![CI](https://github.com/TabularisDB/tabularis-libsql-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/TabularisDB/tabularis-libsql-plugin/actions/workflows/ci.yml)
+
 > ⚠️ **Work in progress** — this plugin is under active development. APIs,
 > behavior and feature coverage may change, and things may break. Use at your
 > own risk.
@@ -7,8 +9,8 @@
 A [Tabularis](https://github.com/TabularisDB/tabularis) database driver plugin
 for **libSQL**. It connects to:
 
-- **Local libSQL / SQLite files** on disk (via bundled SQLite — nothing to
-  install), and
+- **Local libSQL / SQLite files** on disk (via the bundled libSQL fork — nothing
+  to install), and
 - **Remote Turso / sqld servers** over the **Hrana HTTP** protocol.
 
 The plugin is a standalone executable that speaks Tabularis' JSON-RPC protocol
@@ -23,14 +25,24 @@ The driver picks a backend from the connection form automatically:
 | You enter | Backend |
 |-----------|---------|
 | A file path in **Database** (e.g. `/data/app.db`, `~/notes.db`, `:memory:`) | Local SQLite file |
+| A `file:` URI in **Database** / connection string (e.g. `file:///data/app.db`) | Local SQLite file |
 | A URL in **Database** or **Host** (e.g. `libsql://my-db.turso.io`, `http://localhost:8080/dev/example/`) | Remote Hrana HTTP |
 | A bare host in **Host** (e.g. `db.turso.io`) | Remote Hrana HTTP (`https://`) |
 
-For Turso, put the **auth token** in the **Password** field, or append it to the
-URL as `?authToken=...`. `libsql://`, `wss://` and `turso://` URLs are
+A connection URI (`connection_uri`) is authoritative over the decomposed
+`host`/`port`/`database` fields. `libsql://`, `wss://` and `turso://` URLs are
 automatically rewritten to `https://` (and `ws://` to `http://`) for the Hrana
-HTTP endpoint. `http://` and `https://` URLs are used as-is. A bare
-`localhost:8080` host uses `http://` automatically.
+HTTP endpoint; `http://` and `https://` URLs are used as-is.
+
+For a decomposed `host`, the scheme is chosen from `ssl_mode`:
+
+- `ssl_mode=disable` forces `http://` for any host.
+- A loopback host (`localhost`, `127.0.0.1`, `[::1]`) without
+  `ssl_mode=require` also uses `http://`.
+- Everything else uses `https://`.
+
+For Turso, put the **auth token** in the **Password** field, or append it to the
+URL as `?authToken=...`.
 
 Self-hosted sqld namespaces: the namespace is derived from the URL path
 (`http://localhost:8080/dev/example/` → `example`) and sent as the `x-namespace`
@@ -50,13 +62,15 @@ http://localhost:8080/dev/example/
 
 | Area | Status |
 |------|--------|
-| `test_connection`, `ping` | ✅ |
+| `initialize`, `ping`, `test_connection` | ✅ |
+| Connection-string import (`connection_uri` + `turso`/`http`/`https`/`ws`/`wss`/`file` schemes) | ✅ |
 | Tables, columns, indexes, foreign keys | ✅ |
+| Triggers: list + definition | ✅ |
 | Views: list, definition, columns, create/alter/drop | ✅ |
-| Query execution with server-side LIMIT/OFFSET pagination + total count | ✅ |
+| Query execution with LIMIT/OFFSET pagination for wrappable `SELECT`s (`has_more` from a one-row-ahead fetch; `total_rows` is always `null`) | ✅ |
 | `EXPLAIN QUERY PLAN` | ✅ |
 | Insert / update / delete rows (bound parameters) | ✅ |
-| Schema snapshot + batch columns/FKs (ER diagram) | ✅ |
+| Schema snapshot + batch columns/FKs — powers the ER diagram | ✅ |
 | `CREATE TABLE` SQL, add column, create/drop index | ✅ |
 | Schemas, stored routines | ❌ (not a SQLite concept — Turso has no stored procedures, and its multi-database model is separate databases, not schemas) |
 | Rename column | ✅ everywhere (vanilla `RENAME COLUMN`) |
@@ -66,6 +80,10 @@ http://localhost:8080/dev/example/
 
 Identifiers are quoted ANSI-style (`"name"`). Booleans are stored as `0`/`1` and
 BLOBs are returned base64-encoded.
+
+`get_schema_snapshot` returns the host's `TableSchema` array shape — one
+`{name, columns, foreign_keys}` entry per table — which is what Tabularis
+consumes for the ER diagram. An empty schema returns `[]`.
 
 ### Schema changes via ALTER COLUMN
 
@@ -93,15 +111,25 @@ silently doing nothing.
 
 ## Build & test
 
-Requires a Rust toolchain (and a C compiler for the bundled SQLite).
+Requires a Rust toolchain (`rust-toolchain.toml` pins the stable channel with
+`rustfmt` and `clippy`) and a C compiler for the bundled SQLite. `just` is
+convenient but optional — every recipe is a thin wrapper over cargo.
 
 ```bash
 just test          # cargo test — unit tests for SQL builders, parsing, RPC
 just build         # debug build
 just release       # optimized release build
 just lint          # clippy -D warnings
-just dev-install   # build + copy binary + manifest into the Tabularis plugins dir
+just fmt           # rustfmt
+just dev-install   # build + copy binary + manifest into plugins/drivers/libsql
 just repl          # local JSON-RPC REPL over stdio
+```
+
+CI runs the same suite with the lockfile pinned:
+
+```bash
+cargo build --locked
+cargo test --locked --all-targets
 ```
 
 Or directly with cargo:
@@ -120,29 +148,45 @@ echo '{"jsonrpc":"2.0","method":"get_tables","params":{"params":{"database":"/tm
 
 ## Installing
 
-`just dev-install` copies `libsql-plugin` and `.tabularium` into the Tabularis
-plugins folder (the location Tabularis actually scans — derived from
-`ProjectDirs::from("com", "debba", "tabularis")`):
+### Release archive
 
-- **Linux:** `~/.local/share/tabularis/plugins/libsql/`
-- **macOS:** `~/Library/Application Support/tabularis/plugins/libsql/`
-- **Windows:** `%APPDATA%\tabularis\plugins\libsql\`
+Download `libsql-plugin-<platform>.zip` from the
+[releases page](https://github.com/TabularisDB/tabularis-libsql-plugin/releases)
+and unpack it so the driver folder contains the executable, `.tabularium` and
+`assets/`:
 
-Restart Tabularis (or toggle the plugin in Settings) and **libSQL** appears in
-the Database Type list.
+- **Linux:** `~/.local/share/tabularis/plugins/drivers/libsql/`
+- **macOS:** `~/Library/Application Support/tabularis/plugins/drivers/libsql/`
+- **Windows:** `%APPDATA%\tabularis\plugins\drivers\libsql\`
+
+The root is the Tabularis config directory
+(`ProjectDirs::from("com", "debba", "tabularis")`). Tabularis resolves
+kind-scoped bundles (`plugins/drivers/<id>`) before flat `plugins/<id>` bundles,
+so keep the `drivers` segment — a flat copy is shadowed by an installed bundle.
+Each release also publishes `.tabularium` as a standalone asset.
+
+### From source
+
+`just dev-install` builds a debug binary and copies it plus `.tabularium` into
+the same `plugins/drivers/libsql` folder.
+
+Either way, restart Tabularis (or toggle the plugin in Settings) and **libSQL**
+appears in the Database Type list.
 
 ## Architecture
 
 ```
 src/
-├── main.rs              # stdio JSON-RPC loop
+├── main.rs              # stdio JSON-RPC loop (one request line in, one response line out)
+├── lib.rs               # shared dispatch, used by main.rs and the REPL
 ├── rpc.rs               # method routing + response helpers
 ├── client.rs            # backend resolution (local vs remote) + unified query/execute
 ├── hrana.rs             # Hrana-over-HTTP pipeline client (remote)
 ├── models.rs            # ConnectionParams
 ├── error.rs             # PluginError
 ├── handlers/            # metadata / query / crud / ddl
-└── utils/               # identifiers, pagination, SQL classification, value conversion
+├── utils/               # identifiers, pagination, SQL classification, value conversion
+└── bin/test_plugin.rs   # `just repl` driver
 ```
 
 Local files use the embedded **libSQL fork of SQLite** (bundled — nothing to
