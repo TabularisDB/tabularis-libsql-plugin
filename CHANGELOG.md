@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-10-26
+
+### Fixed
+
+- The ER diagram could never load on a libSQL connection: `get_schema_snapshot`
+  returned a `{tables, columns, foreign_keys}` envelope, while the host
+  deserializes the result straight into `Vec<TableSchema>` and rejected it with
+  `invalid type: map, expected a sequence`. The handler now returns one
+  `{name, columns, foreign_keys}` entry per table, and an empty schema is `[]`.
+- `just dev-install` and `uninstall` pointed at the flat `plugins/libsql`
+  bundle, which the host shadows once a kind-scoped `plugins/drivers/libsql`
+  bundle exists. Both now target the kind-first path on Linux, macOS and
+  Windows.
+
 ## [1.0.2] - 2026-10-25
 
 ### Fixed
@@ -117,6 +131,8 @@ Thanks to @debba, @NewtTheWolf and @jonaspm — see the
 [v1.0.0 release notes](https://github.com/TabularisDB/tabularis-libsql-plugin/releases/tag/v1.0.0)
 for the full list.
 
-[Unreleased]: https://github.com/TabularisDB/tabularis-libsql-plugin/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/TabularisDB/tabularis-libsql-plugin/compare/v1.0.3...HEAD
+[1.0.3]: https://github.com/TabularisDB/tabularis-libsql-plugin/compare/v1.0.2...v1.0.3
+[1.0.2]: https://github.com/TabularisDB/tabularis-libsql-plugin/releases/tag/v1.0.2
 [1.0.1]: https://github.com/TabularisDB/tabularis-libsql-plugin/releases/tag/v1.0.1
 [1.0.0]: https://github.com/TabularisDB/tabularis-libsql-plugin/releases/tag/v1.0.0
